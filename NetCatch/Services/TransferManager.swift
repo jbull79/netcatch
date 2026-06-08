@@ -106,9 +106,13 @@ final class TransferManager: ObservableObject {
                 return
             }
 
+            // Receiver reports how much of each item it already holds (resume).
+            let resume = try await link.receiveSecureObject(ResumeInfo.self)
+
             transfer.state = .transferring
-            for item in prepared {
-                try await sendBlob(link: link, prepared: item, transfer: transfer)
+            for (i, item) in prepared.enumerated() {
+                let from = i < resume.offsets.count ? max(0, resume.offsets[i]) : 0
+                try await sendBlob(link: link, prepared: item, transfer: transfer, fromOffset: from)
             }
             // Wait for the receiver to confirm full receipt before closing, so the
             // final bytes are never dropped by an early teardown.
@@ -121,10 +125,15 @@ final class TransferManager: ObservableObject {
         cleanup(prepared)
     }
 
-    private func sendBlob(link: PeerLink, prepared: PreparedItem, transfer: Transfer) async throws {
+    private func sendBlob(link: PeerLink, prepared: PreparedItem, transfer: Transfer,
+                          fromOffset: Int64 = 0) async throws {
         let handle = try FileHandle(forReadingFrom: prepared.blobURL)
         defer { try? handle.close() }
-        var offset: UInt64 = 0
+        var offset = UInt64(max(0, fromOffset))
+        if offset > 0 {
+            try handle.seek(toOffset: offset)
+            transfer.advance(by: Int64(offset))   // count already-received bytes as done
+        }
         while true {
             let chunk = (try handle.read(upToCount: chunkSize)) ?? Data()
             if chunk.isEmpty { break }
@@ -170,8 +179,16 @@ final class TransferManager: ObservableObject {
             }
 
             trust.trust(link.remoteFingerprint, name: link.remoteName)
+            // Tell the sender how much of each item we already hold, so it can resume.
+            let resumeOffsets = header.items.map { item -> Int64 in
+                let have = PartialStore.size(forSHA: item.sha256)
+                return (have > 0 && have <= item.transmittedSize) ? have : 0
+            }
+            try await link.sendSecureObject(ResumeInfo(offsets: resumeOffsets))
+
             transfer.state = .transferring
-            let location = try await receivePayload(link: link, header: header, decision: decision, transfer: transfer)
+            let location = try await receivePayload(link: link, header: header, decision: decision,
+                                                    resumeOffsets: resumeOffsets, transfer: transfer)
             transfer.savedLocation = location
             // Confirm receipt, then wait for the sender to close first so the ack is
             // guaranteed flushed before we tear down our side.
@@ -187,25 +204,32 @@ final class TransferManager: ObservableObject {
         }
     }
 
-    private func receivePayload(link: PeerLink, header: TransferHeader,
-                               decision: ReceiveDecision, transfer: Transfer) async throws -> URL {
+    private func receivePayload(link: PeerLink, header: TransferHeader, decision: ReceiveDecision,
+                               resumeOffsets: [Int64], transfer: Transfer) async throws -> URL {
         let scoped = decision.directory.startAccessingSecurityScopedResource()
         defer { if scoped { decision.directory.stopAccessingSecurityScopedResource() } }
 
         var firstDestination: URL?
         for (index, item) in header.items.enumerated() {
-            let tempURL = ArchiveService.tempDirectory().appendingPathComponent(UUID().uuidString + ".blob")
-            FileManager.default.createFile(atPath: tempURL.path, contents: nil)
-            let handle = try FileHandle(forWritingTo: tempURL)
+            // Persistent, content-addressed partial blob (survives interruption/restart).
+            let partURL = PartialStore.url(forSHA: item.sha256)
+            let resumeOffset = index < resumeOffsets.count ? resumeOffsets[index] : 0
+            if resumeOffset == 0 {
+                FileManager.default.createFile(atPath: partURL.path, contents: nil)  // fresh/truncate
+            }
+            let handle = try FileHandle(forWritingTo: partURL)
+            defer { try? handle.close() }
+            try handle.seek(toOffset: UInt64(resumeOffset))
 
-            var received: Int64 = 0
+            var received: Int64 = resumeOffset
+            if resumeOffset > 0 { transfer.advance(by: resumeOffset) }   // already-held bytes count as done
             while received < item.transmittedSize {
                 let frame = try await link.receiveSecure()
                 guard frame.count >= 8 else { throw LinkError.malformed }
                 let offset = frame.prefix(8).withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }.bigEndian
                 let payload = frame.dropFirst(8)
-                // Require contiguous, in-bounds writes: prevents arbitrary seeks that
-                // could create a huge sparse file (resource-exhaustion DoS).
+                // Require contiguous, in-bounds writes (now starting at the resume point):
+                // prevents arbitrary seeks that could create a huge sparse file (DoS).
                 guard offset == UInt64(received),
                       offset + UInt64(payload.count) <= UInt64(item.transmittedSize) else {
                     throw LinkError.malformed
@@ -215,22 +239,25 @@ final class TransferManager: ObservableObject {
                 received += Int64(payload.count)
                 transfer.advance(by: Int64(payload.count))
             }
-            try? handle.close()
+            try handle.close()
 
             transfer.state = .verifying
             let digest = try await Task.detached(priority: .userInitiated) {
-                try CryptoService.sha256Hex(ofFileAt: tempURL)
+                try CryptoService.sha256Hex(ofFileAt: partURL)
             }.value
-            guard digest == item.sha256 else { throw LinkError.integrityMismatch(item.name) }
+            guard digest == item.sha256 else {
+                PartialStore.remove(sha: item.sha256)   // corrupt — discard so a retry restarts cleanly
+                throw LinkError.integrityMismatch(item.name)
+            }
 
             let baseName = Self.sanitizedComponent(index == 0 ? decision.name : item.name)
             let target = decision.directory.appendingPathComponent(baseName)
             guard Self.isContained(target, in: decision.directory) else { throw LinkError.malformed }
             let destination = uniqueURL(target)
             try await Task.detached(priority: .userInitiated) {
-                try ArchiveService.reconstruct(item: item, blobURL: tempURL, to: destination)
+                try ArchiveService.reconstruct(item: item, blobURL: partURL, to: destination)
             }.value
-            try? FileManager.default.removeItem(at: tempURL)
+            PartialStore.remove(sha: item.sha256)        // completed — drop the partial
             if firstDestination == nil { firstDestination = destination }
             transfer.state = .transferring
         }

@@ -30,6 +30,13 @@ struct TransferDecision: Codable {
     var accepted: Bool
 }
 
+/// Sent by the receiver right after an accept: how many transmitted bytes it already
+/// holds for each header item (content-addressed by sha256). The sender resumes each
+/// item from its offset instead of restarting an interrupted transfer. 0 = from start.
+struct ResumeInfo: Codable {
+    var offsets: [Int64]
+}
+
 /// Sent by the receiver once every byte has been received, verified, and written.
 /// The sender waits for this before closing, so the connection is never torn down
 /// while final bytes are still in flight (which would truncate the transfer).
