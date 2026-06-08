@@ -159,6 +159,11 @@ final class TransferManager: ObservableObject {
             try await link.start()
             try await link.handshake(localName: settings.deviceName)
             let header = try await link.receiveSecureObject(TransferHeader.self)
+            // Reject a malformed sha256 before it is ever used as a partial-file name
+            // (path-traversal guard on the untrusted header).
+            guard header.items.allSatisfy({ PartialStore.isValidSHA256($0.sha256) }) else {
+                throw LinkError.malformed
+            }
 
             transfer.peerName = link.remoteName
             transfer.peerFingerprint = link.remoteFingerprint

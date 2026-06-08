@@ -28,14 +28,23 @@ final class AppModel: ObservableObject {
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    /// Send triggered by an external entry point (the `netcatch://` URL scheme or the
-    /// Shortcuts action). Resolves a named peer — waiting briefly for Bonjour — and
-    /// sends; if the peer is missing or unspecified, queues the files in the Send pane
-    /// for the user to pick a destination. Returns true if a transfer started.
+    /// Send triggered by an external entry point. `confirm` MUST be true for any
+    /// web-triggerable source (the `netcatch://` URL scheme): in that case we never
+    /// auto-send — we just queue the files in the Send pane so the user explicitly
+    /// picks a destination. Only the user-authored Shortcuts action passes
+    /// `confirm: false`, allowing a direct send to a named peer. Returns true if a
+    /// transfer actually started.
     @discardableResult
-    func sendViaAutomation(urls: [URL], peerName: String?, compress: Bool?) async -> Bool {
+    func sendViaAutomation(urls: [URL], peerName: String?, compress: Bool?, confirm: Bool) async -> Bool {
         let files = urls.filter { FileManager.default.fileExists(atPath: $0.path) }
         guard !files.isEmpty else { return false }
+
+        // Untrusted/web-triggered source → require an explicit on-screen confirmation.
+        if confirm {
+            queueSend(urls: files)
+            return false
+        }
+
         let doCompress = compress ?? settings.compressByDefault
         NSApp.activate(ignoringOtherApps: true)
         manager.discovery.start()   // idempotent; make sure we're browsing
@@ -79,9 +88,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         for url in urls {
             guard let req = AutomationRouter.parse(url) else { continue }
             Task { @MainActor in
+                // URL scheme is web-triggerable → require explicit confirmation.
                 await AppModel.shared.sendViaAutomation(urls: req.urls,
                                                         peerName: req.peerName,
-                                                        compress: req.compress)
+                                                        compress: req.compress,
+                                                        confirm: true)
             }
         }
     }

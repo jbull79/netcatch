@@ -13,7 +13,15 @@ enum PartialStore {
         return dir
     }
 
-    /// Path for a given transmitted-blob sha256 (hex — already a safe filename).
+    /// True only for a well-formed sha256 (exactly 64 lowercase hex chars). Used to
+    /// reject an attacker-supplied `sha256` before it is ever used as a filename
+    /// component (the value arrives in the untrusted transfer header).
+    static func isValidSHA256(_ s: String) -> Bool {
+        s.count == 64 && s.allSatisfy { ("0"..."9").contains($0) || ("a"..."f").contains($0) }
+    }
+
+    /// Path for a given transmitted-blob sha256. Callers must pass a value that has
+    /// already passed `isValidSHA256` (so it cannot contain path separators or `..`).
     static func url(forSHA sha: String) -> URL {
         directory().appendingPathComponent(sha + ".part")
     }

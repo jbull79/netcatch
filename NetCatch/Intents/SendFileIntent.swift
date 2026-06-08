@@ -29,8 +29,9 @@ struct SendFileIntent: AppIntent {
     @MainActor
     func perform() async throws -> some IntentResult {
         let urls = try files.map { try $0.materializeForSending() }
+        // User-authored Shortcut → consent is explicit, so a direct send is allowed.
         let started = await AppModel.shared.sendViaAutomation(
-            urls: urls, peerName: peer, compress: compress)
+            urls: urls, peerName: peer, compress: compress, confirm: false)
         // Either a transfer started, or the app opened with the files queued.
         _ = started
         return .result()
