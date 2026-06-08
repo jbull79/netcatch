@@ -15,19 +15,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0</string>
-	<key>CFBundleVersion</key>
-	<string>1</string>
-	<key>LSMinimumSystemVersion</key>
-	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
-	<key>NSHumanReadableCopyright</key>
-	<string>NetCatch</string>
-	<key>NSLocalNetworkUsageDescription</key>
-	<string>NetCatch finds and connects to other Macs on your local network to send and receive files.</string>
-	<key>NSBonjourServices</key>
-	<array>
-		<string>_netcatch._tcp</string>
-	</array>
+	<string>1.0.0</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -39,6 +27,18 @@
 			</array>
 		</dict>
 	</array>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>$(MACOSX_DEPLOYMENT_TARGET)</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_netcatch._tcp</string>
+	</array>
+	<key>NSHumanReadableCopyright</key>
+	<string>NetCatch</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>NetCatch finds and connects to other Macs on your local network to send and receive files.</string>
 	<key>NSServices</key>
 	<array>
 		<dict>
