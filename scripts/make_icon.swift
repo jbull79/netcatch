@@ -169,13 +169,24 @@ func save(_ image: CGImage, to path: String) {
     CGImageDestinationFinalize(dest)
 }
 
-for px in sizes {
-    guard let img = render(size: px) else { print("FAILED \(px)"); continue }
-    if previewMode {
+if previewMode {
+    if let img = render(size: 1024) {
         save(img, to: "/tmp/netcatch_preview.png")
         print("wrote /tmp/netcatch_preview.png")
-    } else {
-        save(img, to: "\(outputDir)/icon_\(px).png")
-        print("wrote icon_\(px).png")
+    }
+} else {
+    // One uniquely-named file per asset-catalog slot at its exact pixel size, so
+    // actool never dedupes and drops a size (which yields a blank Dock icon).
+    let slots: [(name: String, px: Int)] = [
+        ("icon_16x16", 16), ("icon_16x16@2x", 32),
+        ("icon_32x32", 32), ("icon_32x32@2x", 64),
+        ("icon_128x128", 128), ("icon_128x128@2x", 256),
+        ("icon_256x256", 256), ("icon_256x256@2x", 512),
+        ("icon_512x512", 512), ("icon_512x512@2x", 1024),
+    ]
+    for slot in slots {
+        guard let img = render(size: slot.px) else { print("FAILED \(slot.name)"); continue }
+        save(img, to: "\(outputDir)/\(slot.name).png")
+        print("wrote \(slot.name).png (\(slot.px)px)")
     }
 }
