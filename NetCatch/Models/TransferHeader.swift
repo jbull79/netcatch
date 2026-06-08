@@ -29,3 +29,10 @@ struct Handshake: Codable {
 struct TransferDecision: Codable {
     var accepted: Bool
 }
+
+/// Sent by the receiver once every byte has been received, verified, and written.
+/// The sender waits for this before closing, so the connection is never torn down
+/// while final bytes are still in flight (which would truncate the transfer).
+struct TransferAck: Codable {
+    var ok: Bool
+}

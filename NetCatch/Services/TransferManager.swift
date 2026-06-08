@@ -110,6 +110,9 @@ final class TransferManager: ObservableObject {
             for item in prepared {
                 try await sendBlob(link: link, prepared: item, transfer: transfer)
             }
+            // Wait for the receiver to confirm full receipt before closing, so the
+            // final bytes are never dropped by an early teardown.
+            _ = try await link.receiveSecureObject(TransferAck.self)
             link.cancel()
             finish(transfer, succeeded: true)
         } catch {
@@ -170,6 +173,10 @@ final class TransferManager: ObservableObject {
             transfer.state = .transferring
             let location = try await receivePayload(link: link, header: header, decision: decision, transfer: transfer)
             transfer.savedLocation = location
+            // Confirm receipt, then wait for the sender to close first so the ack is
+            // guaranteed flushed before we tear down our side.
+            try await link.sendSecureObject(TransferAck(ok: true))
+            _ = try? await link.receiveSecure()
             link.cancel()
             finish(transfer, succeeded: true)
             NotificationService.notify(title: "Received from \(transfer.peerName)",
