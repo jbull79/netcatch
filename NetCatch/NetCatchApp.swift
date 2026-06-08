@@ -27,6 +27,33 @@ final class AppModel: ObservableObject {
         pendingSendURLs = urls
         NSApp.activate(ignoringOtherApps: true)
     }
+
+    /// Send triggered by an external entry point (the `netcatch://` URL scheme or the
+    /// Shortcuts action). Resolves a named peer — waiting briefly for Bonjour — and
+    /// sends; if the peer is missing or unspecified, queues the files in the Send pane
+    /// for the user to pick a destination. Returns true if a transfer started.
+    @discardableResult
+    func sendViaAutomation(urls: [URL], peerName: String?, compress: Bool?) async -> Bool {
+        let files = urls.filter { FileManager.default.fileExists(atPath: $0.path) }
+        guard !files.isEmpty else { return false }
+        let doCompress = compress ?? settings.compressByDefault
+        NSApp.activate(ignoringOtherApps: true)
+        manager.discovery.start()   // idempotent; make sure we're browsing
+
+        if let name = peerName, !name.isEmpty {
+            for _ in 0..<60 {       // wait up to ~6s for the named peer to appear
+                if let peer = manager.discovery.peers.first(where: {
+                    $0.name.caseInsensitiveCompare(name) == .orderedSame
+                }) {
+                    manager.send(urls: files, to: peer, compress: doCompress)
+                    return true
+                }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+        }
+        queueSend(urls: files)      // fall back to manual peer choice
+        return false
+    }
 }
 
 /// Receives file URLs from the Finder right-click "Send with NetCatch" service.
@@ -47,10 +74,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
-        // Handle netcatch:// links (v2) — for now, treat file URLs as a send request.
-        let fileURLs = urls.filter { $0.isFileURL }
-        if !fileURLs.isEmpty {
-            AppModel.shared.queueSend(urls: fileURLs)
+        // Route file:// (queued for manual pick) and netcatch://send?… (optionally to a
+        // named peer) through the shared automation entry point.
+        for url in urls {
+            guard let req = AutomationRouter.parse(url) else { continue }
+            Task { @MainActor in
+                await AppModel.shared.sendViaAutomation(urls: req.urls,
+                                                        peerName: req.peerName,
+                                                        compress: req.compress)
+            }
         }
     }
 }
