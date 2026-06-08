@@ -22,6 +22,12 @@ enum LinkError: Error, LocalizedError {
     }
 }
 
+/// Largest single frame we will allocate for / accept. Payload chunks are 256 KB;
+/// the header JSON for large batches is still well under this. Anything bigger is
+/// treated as malformed, preventing a hostile length prefix from forcing a huge
+/// allocation (memory-exhaustion DoS).
+private let maxFrameSize = 16 * 1024 * 1024
+
 /// Low-level async framing over an NWConnection.
 extension NWConnection {
     func startAndWaitReady() async throws {
@@ -84,6 +90,7 @@ extension NWConnection {
     func receiveFrame() async throws -> Data {
         let header = try await receiveExact(4)
         let length = header.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.bigEndian
+        guard length <= maxFrameSize else { throw LinkError.malformed }
         return try await receiveExact(Int(length))
     }
 }

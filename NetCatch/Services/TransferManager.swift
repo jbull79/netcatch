@@ -197,6 +197,12 @@ final class TransferManager: ObservableObject {
                 guard frame.count >= 8 else { throw LinkError.malformed }
                 let offset = frame.prefix(8).withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }.bigEndian
                 let payload = frame.dropFirst(8)
+                // Require contiguous, in-bounds writes: prevents arbitrary seeks that
+                // could create a huge sparse file (resource-exhaustion DoS).
+                guard offset == UInt64(received),
+                      offset + UInt64(payload.count) <= UInt64(item.transmittedSize) else {
+                    throw LinkError.malformed
+                }
                 try handle.seek(toOffset: offset)
                 handle.write(Data(payload))
                 received += Int64(payload.count)

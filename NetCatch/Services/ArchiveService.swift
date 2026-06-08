@@ -21,7 +21,10 @@ enum ArchiveService {
         "pdf", "docx", "xlsx", "pptx", "dmg", "pkg"
     ]
 
-    private static let maxInMemoryCompression: Int64 = 200 * 1024 * 1024
+    /// Slack allowed above the claimed original size when decompressing, before we
+    /// treat the stream as a decompression bomb and abort.
+    private static let decompressionSlack: Int64 = 1 << 20      // 1 MB
+    private static let streamBufferSize = 1 << 20               // 1 MB I/O buffer
 
     static func tempDirectory() -> URL {
         let dir = FileManager.default.temporaryDirectory
@@ -65,27 +68,28 @@ enum ArchiveService {
         let worthCompressing = compressRequested
             && !incompressibleExtensions.contains(ext)
             && originalSize > 0
-            && originalSize <= maxInMemoryCompression
 
         if worthCompressing {
-            let raw = try Data(contentsOf: url)
-            if let compressed = try? (raw as NSData).compressed(using: .lzfse) as Data,
-               compressed.count < raw.count {
-                let blobURL = tempDirectory().appendingPathComponent(UUID().uuidString + ".lzfse")
-                try compressed.write(to: blobURL)
+            // Stream-compress to a temp blob (no full-file in-memory load, so this
+            // works for arbitrarily large files). Keep it only if it actually shrank.
+            let blobURL = tempDirectory().appendingPathComponent(UUID().uuidString + ".lzfse")
+            try compressFileStream(url, to: blobURL)
+            let compressedSize = fileSize(blobURL)
+            if compressedSize > 0 && compressedSize < originalSize {
                 let item = TransferItem(
                     name: url.lastPathComponent,
                     originalSize: originalSize,
-                    transmittedSize: Int64(compressed.count),
+                    transmittedSize: compressedSize,
                     isDirectory: false,
                     compressed: true,
-                    sha256: CryptoService.sha256Hex(of: compressed)
+                    sha256: try CryptoService.sha256Hex(ofFileAt: blobURL)
                 )
                 return PreparedItem(item: item, blobURL: blobURL, blobIsTemporary: true)
             }
+            try? FileManager.default.removeItem(at: blobURL)   // no benefit — send raw
         }
 
-        // Send the file as-is (no benefit, too big, or compression disabled).
+        // Send the file as-is (no benefit or compression disabled).
         let item = TransferItem(
             name: url.lastPathComponent,
             originalSize: originalSize,
@@ -109,19 +113,69 @@ enum ArchiveService {
             defer { try? FileManager.default.removeItem(at: staging) }
             try extractArchive(blobURL, to: staging, compressed: item.compressed)
             try validateNoEscape(root: staging)
+            // Reject a decompression bomb: extracted size must be near the claimed original.
+            guard directorySize(staging) <= item.originalSize + decompressionSlack else {
+                throw ArchiveError.tooLarge
+            }
             if FileManager.default.fileExists(atPath: destination.path) {
                 try FileManager.default.removeItem(at: destination)
             }
             try FileManager.default.moveItem(at: staging, to: destination)
         } else if item.compressed {
-            let compressed = try Data(contentsOf: blobURL)
-            let raw = try (compressed as NSData).decompressed(using: .lzfse) as Data
-            try raw.write(to: destination)
+            // Stream-decompress with a hard output cap so a small blob can't inflate
+            // into an unbounded file (decompression bomb).
+            try decompressFileStream(blobURL, to: destination,
+                                     maxOutput: item.originalSize + decompressionSlack)
         } else {
             if FileManager.default.fileExists(atPath: destination.path) {
                 try FileManager.default.removeItem(at: destination)
             }
             try FileManager.default.moveItem(at: blobURL, to: destination)
+        }
+    }
+
+    // MARK: Single-file streaming (de)compression
+
+    /// LZFSE-compress `src` to `dest`, streaming through a fixed buffer so memory
+    /// stays flat regardless of file size.
+    static func compressFileStream(_ src: URL, to dest: URL) throws {
+        guard let writeStream = ArchiveByteStream.fileStream(
+                path: FilePath(dest.path), mode: .writeOnly,
+                options: [.create, .truncate], permissions: FilePermissions(rawValue: 0o644)),
+              let compress = ArchiveByteStream.compressionStream(using: .lzfse, writingTo: writeStream),
+              let readStream = ArchiveByteStream.fileStream(
+                path: FilePath(src.path), mode: .readOnly,
+                options: [], permissions: FilePermissions(rawValue: 0o644))
+        else { throw ArchiveError.streamFailed }
+        // Close compress before writeStream so the final compressed bytes flush.
+        defer { try? readStream.close(); try? compress.close(); try? writeStream.close() }
+        _ = try ArchiveByteStream.process(readingFrom: readStream, writingTo: compress)
+    }
+
+    /// Stream-decompress `src` into `dest`, aborting if output exceeds `maxOutput`
+    /// (decompression-bomb guard). Never holds the whole file in memory.
+    static func decompressFileStream(_ src: URL, to dest: URL, maxOutput: Int64) throws {
+        guard let readStream = ArchiveByteStream.fileStream(
+                path: FilePath(src.path), mode: .readOnly,
+                options: [], permissions: FilePermissions(rawValue: 0o644)),
+              let decompress = ArchiveByteStream.decompressionStream(readingFrom: readStream)
+        else { throw ArchiveError.streamFailed }
+        defer { try? decompress.close(); try? readStream.close() }
+
+        FileManager.default.createFile(atPath: dest.path, contents: nil)
+        let out = try FileHandle(forWritingTo: dest)
+        defer { try? out.close() }
+
+        var buffer = [UInt8](repeating: 0, count: streamBufferSize)
+        var total: Int64 = 0
+        while true {
+            let n = try buffer.withUnsafeMutableBytes { raw in
+                try decompress.read(into: raw)
+            }
+            if n == 0 { break }
+            total += Int64(n)
+            if total > maxOutput { throw ArchiveError.tooLarge }
+            out.write(Data(bytes: buffer, count: n))
         }
     }
 
@@ -231,5 +285,5 @@ enum ArchiveService {
         }
     }
 
-    enum ArchiveError: Error { case streamFailed, unsafeEntry }
+    enum ArchiveError: Error { case streamFailed, unsafeEntry, tooLarge }
 }

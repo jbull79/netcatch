@@ -1,27 +1,62 @@
 import Foundation
 import CryptoKit
+import Security
 
 /// All cryptography: a stable identity key for fingerprints, ephemeral ECDH for
 /// per-session AES-GCM keys, plus AES-GCM seal/open and SHA-256 helpers.
 enum CryptoService {
-    private static let identityKeyDefaultsKey = "netcatch.identitySigningKey"
+    private static let identityKeyDefaultsKey = "netcatch.identitySigningKey"   // legacy (migrated to Keychain)
+    private static let keychainService = "com.netcatch.identity"
+    private static let keychainAccount = "identitySigningKey"
     private static let hkdfSalt = Data("NetCatch-v1-salt".utf8)
     private static let hkdfInfo = Data("NetCatch-session-key".utf8)
 
     // MARK: Identity
 
-    /// Stable identity **signing** key, generated once and persisted. The peer must
-    /// prove possession of this key during the handshake (it signs its ephemeral
-    /// key), so the fingerprint shown in the accept prompt actually authenticates
-    /// the sender rather than just echoing a public value anyone could replay.
+    /// Stable identity **signing** key, generated once and persisted in the
+    /// Keychain. The peer must prove possession of this key during the handshake
+    /// (it signs its ephemeral key), so the fingerprint shown in the accept prompt
+    /// actually authenticates the sender rather than echoing a replayable value.
     static func identitySigningKey() -> Curve25519.Signing.PrivateKey {
-        if let raw = UserDefaults.standard.data(forKey: identityKeyDefaultsKey),
+        if let raw = keychainLoad(),
            let key = try? Curve25519.Signing.PrivateKey(rawRepresentation: raw) {
             return key
         }
+        // One-time migration from the earlier UserDefaults storage.
+        if let raw = UserDefaults.standard.data(forKey: identityKeyDefaultsKey),
+           let key = try? Curve25519.Signing.PrivateKey(rawRepresentation: raw) {
+            keychainSave(raw)
+            UserDefaults.standard.removeObject(forKey: identityKeyDefaultsKey)
+            return key
+        }
         let key = Curve25519.Signing.PrivateKey()
-        UserDefaults.standard.set(key.rawRepresentation, forKey: identityKeyDefaultsKey)
+        keychainSave(key.rawRepresentation)
         return key
+    }
+
+    // MARK: Keychain (identity private key storage)
+
+    private static func keychainBaseQuery() -> [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword,
+         kSecAttrService as String: keychainService,
+         kSecAttrAccount as String: keychainAccount]
+    }
+
+    private static func keychainLoad() -> Data? {
+        var query = keychainBaseQuery()
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        return status == errSecSuccess ? result as? Data : nil
+    }
+
+    private static func keychainSave(_ data: Data) {
+        SecItemDelete(keychainBaseQuery() as CFDictionary)
+        var add = keychainBaseQuery()
+        add[kSecValueData as String] = data
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        SecItemAdd(add as CFDictionary, nil)
     }
 
     /// Cryptographically-random nonce for handshake freshness.
