@@ -102,8 +102,17 @@ enum ArchiveService {
     /// Turn a received blob back into the final file or folder at `destination`.
     static func reconstruct(item: TransferItem, blobURL: URL, to destination: URL) throws {
         if item.isDirectory {
-            try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
-            try extractArchive(blobURL, to: destination, compressed: item.compressed)
+            // Extract into a confined staging dir first, verify no entry escapes it
+            // (zip-slip / malicious symlinks), then move the verified tree into place.
+            let staging = tempDirectory().appendingPathComponent("extract-" + UUID().uuidString, isDirectory: true)
+            try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: staging) }
+            try extractArchive(blobURL, to: staging, compressed: item.compressed)
+            try validateNoEscape(root: staging)
+            if FileManager.default.fileExists(atPath: destination.path) {
+                try FileManager.default.removeItem(at: destination)
+            }
+            try FileManager.default.moveItem(at: staging, to: destination)
         } else if item.compressed {
             let compressed = try Data(contentsOf: blobURL)
             let raw = try (compressed as NSData).decompressed(using: .lzfse) as Data
@@ -197,5 +206,30 @@ enum ArchiveService {
         return total
     }
 
-    enum ArchiveError: Error { case streamFailed }
+    /// Reject an extracted tree if any entry (or symlink target) resolves outside
+    /// `root` — guards against zip-slip path traversal and symlink escapes from a
+    /// malicious archive.
+    private static func validateNoEscape(root: URL) throws {
+        let fm = FileManager.default
+        let rootPath = root.resolvingSymlinksInPath().standardizedFileURL.path
+        let prefix = rootPath.hasSuffix("/") ? rootPath : rootPath + "/"
+        func inside(_ path: String) -> Bool { path == rootPath || path.hasPrefix(prefix) }
+
+        guard let enumerator = fm.enumerator(at: root,
+                                             includingPropertiesForKeys: [.isSymbolicLinkKey],
+                                             options: []) else { return }
+        for case let url as URL in enumerator {
+            let isSymlink = (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true
+            if isSymlink {
+                let target = try fm.destinationOfSymbolicLink(atPath: url.path)
+                let resolved = URL(fileURLWithPath: target, relativeTo: url.deletingLastPathComponent())
+                    .standardizedFileURL.resolvingSymlinksInPath().path
+                if !inside(resolved) { throw ArchiveError.unsafeEntry }
+            } else if !inside(url.resolvingSymlinksInPath().standardizedFileURL.path) {
+                throw ArchiveError.unsafeEntry
+            }
+        }
+    }
+
+    enum ArchiveError: Error { case streamFailed, unsafeEntry }
 }

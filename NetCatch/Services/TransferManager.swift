@@ -210,8 +210,10 @@ final class TransferManager: ObservableObject {
             }.value
             guard digest == item.sha256 else { throw LinkError.integrityMismatch(item.name) }
 
-            let baseName = index == 0 ? decision.name : item.name
-            let destination = uniqueURL(decision.directory.appendingPathComponent(baseName))
+            let baseName = Self.sanitizedComponent(index == 0 ? decision.name : item.name)
+            let target = decision.directory.appendingPathComponent(baseName)
+            guard Self.isContained(target, in: decision.directory) else { throw LinkError.malformed }
+            let destination = uniqueURL(target)
             try await Task.detached(priority: .userInitiated) {
                 try ArchiveService.reconstruct(item: item, blobURL: tempURL, to: destination)
             }.value
@@ -271,6 +273,24 @@ final class TransferManager: ObservableObject {
         for item in prepared where item.blobIsTemporary {
             try? FileManager.default.removeItem(at: item.blobURL)
         }
+    }
+
+    /// Reduce an attacker-controlled name to a single safe path component, so a
+    /// received name like `../../evil` cannot escape the chosen save directory.
+    static func sanitizedComponent(_ raw: String, fallback: String = "received") -> String {
+        let comp = (raw as NSString).lastPathComponent
+            .replacingOccurrences(of: "\0", with: "")
+        if comp.isEmpty || comp == "." || comp == ".." { return fallback }
+        return comp
+    }
+
+    /// Confirm `url` resolves to a location inside `directory` (defence in depth on
+    /// top of name sanitization).
+    static func isContained(_ url: URL, in directory: URL) -> Bool {
+        let base = directory.standardizedFileURL.path
+        let path = url.standardizedFileURL.path
+        let prefix = base.hasSuffix("/") ? base : base + "/"
+        return path == base || path.hasPrefix(prefix)
     }
 
     private func uniqueURL(_ url: URL) -> URL {

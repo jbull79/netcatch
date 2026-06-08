@@ -8,6 +8,7 @@ enum LinkError: Error, LocalizedError {
     case rejected
     case integrityMismatch(String)
     case malformed
+    case authenticationFailed
 
     var errorDescription: String? {
         switch self {
@@ -16,6 +17,7 @@ enum LinkError: Error, LocalizedError {
         case .rejected: return "The other device declined the transfer."
         case .integrityMismatch(let name): return "Integrity check failed for \(name)."
         case .malformed: return "Received malformed data."
+        case .authenticationFailed: return "Could not verify the other device's identity."
         }
     }
 }
@@ -106,19 +108,36 @@ final class PeerLink {
         connection.cancel()
     }
 
-    /// Exchange ephemeral + identity keys and derive the session key.
+    /// Exchange signed ephemeral + identity keys, verify the peer's signature, and
+    /// derive the session key. Each side signs its ephemeral key with its long-term
+    /// identity key, so the fingerprint authenticates the peer (no key-replay
+    /// impersonation) and the ephemeral DH is bound to that identity (no MITM).
     func handshake(localName: String) async throws {
-        let identity = CryptoService.identityPrivateKey()
+        let identity = CryptoService.identitySigningKey()
         let ephemeral = Curve25519.KeyAgreement.PrivateKey()
+        let ephemeralPub = ephemeral.publicKey.rawRepresentation
+        let nonce = CryptoService.randomNonce()
+        let signature = try identity.signature(for: ephemeralPub + nonce)
         let outgoing = Handshake(identityPub: identity.publicKey.rawRepresentation,
-                                 ephemeralPub: ephemeral.publicKey.rawRepresentation,
-                                 name: localName)
+                                 ephemeralPub: ephemeralPub,
+                                 nonce: nonce,
+                                 name: localName,
+                                 signature: signature)
         try await connection.sendFrame(try JSONEncoder().encode(outgoing))
 
         let incomingData = try await connection.receiveFrame()
         let incoming = try JSONDecoder().decode(Handshake.self, from: incomingData)
+
+        // Verify the peer holds the identity private key behind its fingerprint and
+        // that the ephemeral key it offered is bound to that identity.
+        guard let signingPub = try? Curve25519.Signing.PublicKey(rawRepresentation: incoming.identityPub),
+              signingPub.isValidSignature(incoming.signature, for: incoming.ephemeralPub + incoming.nonce) else {
+            throw LinkError.authenticationFailed
+        }
+
         sessionKey = try CryptoService.deriveSessionKey(ephemeralPrivate: ephemeral,
-                                                        remoteEphemeralPublicRaw: incoming.ephemeralPub)
+                                                        remoteEphemeralPublicRaw: incoming.ephemeralPub,
+                                                        localEphemeralPublicRaw: ephemeralPub)
         remoteName = incoming.name
         remoteFingerprint = CryptoService.fingerprint(of: incoming.identityPub)
     }

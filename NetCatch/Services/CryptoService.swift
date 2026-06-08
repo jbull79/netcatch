@@ -4,22 +4,29 @@ import CryptoKit
 /// All cryptography: a stable identity key for fingerprints, ephemeral ECDH for
 /// per-session AES-GCM keys, plus AES-GCM seal/open and SHA-256 helpers.
 enum CryptoService {
-    private static let identityKeyDefaultsKey = "netcatch.identityPrivateKey"
+    private static let identityKeyDefaultsKey = "netcatch.identitySigningKey"
     private static let hkdfSalt = Data("NetCatch-v1-salt".utf8)
     private static let hkdfInfo = Data("NetCatch-session-key".utf8)
 
     // MARK: Identity
 
-    /// Stable identity key, generated once and persisted. Its public key yields the
-    /// device fingerprint shown in the accept prompt.
-    static func identityPrivateKey() -> Curve25519.KeyAgreement.PrivateKey {
+    /// Stable identity **signing** key, generated once and persisted. The peer must
+    /// prove possession of this key during the handshake (it signs its ephemeral
+    /// key), so the fingerprint shown in the accept prompt actually authenticates
+    /// the sender rather than just echoing a public value anyone could replay.
+    static func identitySigningKey() -> Curve25519.Signing.PrivateKey {
         if let raw = UserDefaults.standard.data(forKey: identityKeyDefaultsKey),
-           let key = try? Curve25519.KeyAgreement.PrivateKey(rawRepresentation: raw) {
+           let key = try? Curve25519.Signing.PrivateKey(rawRepresentation: raw) {
             return key
         }
-        let key = Curve25519.KeyAgreement.PrivateKey()
+        let key = Curve25519.Signing.PrivateKey()
         UserDefaults.standard.set(key.rawRepresentation, forKey: identityKeyDefaultsKey)
         return key
+    }
+
+    /// Cryptographically-random nonce for handshake freshness.
+    static func randomNonce(_ count: Int = 32) -> Data {
+        Data((0..<count).map { _ in UInt8.random(in: UInt8.min...UInt8.max) })
     }
 
     /// Short, human-comparable fingerprint of a raw public key, e.g. `A1B2-C3D4-E5F6-0708`.
@@ -36,11 +43,19 @@ enum CryptoService {
     // MARK: Key agreement
 
     static func deriveSessionKey(ephemeralPrivate: Curve25519.KeyAgreement.PrivateKey,
-                                 remoteEphemeralPublicRaw: Data) throws -> SymmetricKey {
+                                 remoteEphemeralPublicRaw: Data,
+                                 localEphemeralPublicRaw: Data) throws -> SymmetricKey {
         let remote = try Curve25519.KeyAgreement.PublicKey(rawRepresentation: remoteEphemeralPublicRaw)
         let shared = try ephemeralPrivate.sharedSecretFromKeyAgreement(with: remote)
+        // Bind the derived key to both ephemeral public keys (ordered for symmetry)
+        // so the session is tied to this exact handshake transcript.
+        let pair = [localEphemeralPublicRaw, remoteEphemeralPublicRaw]
+            .sorted { $0.lexicographicallyPrecedes($1) }
+        var salt = Data(hkdfSalt)
+        salt.append(pair[0])
+        salt.append(pair[1])
         return shared.hkdfDerivedSymmetricKey(using: SHA256.self,
-                                              salt: hkdfSalt,
+                                              salt: salt,
                                               sharedInfo: hkdfInfo,
                                               outputByteCount: 32)
     }
