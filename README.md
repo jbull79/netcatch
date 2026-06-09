@@ -15,30 +15,20 @@ page, unzip, and move **NetCatch.app** to `/Applications`. Requires macOS 14+.
 ### Opening on a locked-down / managed Mac
 
 Because the app isn't notarized yet, Gatekeeper may report
-*"Apple could not verify 'NetCatch.app' is free from malware."* On a personal Mac the
-right-click → **Open** (or **Privacy & Security → Open Anyway**) handles it. On a
-managed/work Mac those overrides are often disabled by IT policy — try these in order:
+*"Apple could not verify 'NetCatch.app' is free from malware."* On a managed/work Mac
+the usual overrides are often disabled by IT policy. The fastest fix is to **build from
+source on that Mac** (locally built apps aren't quarantined, so Gatekeeper doesn't block
+them):
 
-1. **Build from source (no warning at all).** Apps you compile yourself are never
-   quarantined, so Gatekeeper doesn't block them:
-   ```sh
-   git clone https://github.com/jbull79/netcatch
-   cd netcatch
-   xcodebuild -scheme NetCatch -configuration Release build
-   open ~/Library/Developer/Xcode/DerivedData/NetCatch-*/Build/Products/Release/NetCatch.app
-   ```
-   Requires Xcode or Command Line Tools (`xcode-select --install`).
+```sh
+git clone https://github.com/jbull79/netcatch
+cd netcatch
+xcodebuild -scheme NetCatch -configuration Release build
+open ~/Library/Developer/Xcode/DerivedData/NetCatch-*/Build/Products/Release/NetCatch.app
+```
 
-2. **Remove the quarantine flag** (needs Terminal access):
-   ```sh
-   xattr -dr com.apple.quarantine /path/to/NetCatch.app
-   ```
-
-3. **System Settings → Privacy & Security → "Open Anyway"** — may be greyed out by MDM.
-
-If all three are blocked, that's your Mac's management policy; only your **IT team can
-whitelist** the app. A future [notarized](docs/NOTARIZATION.md) build removes the
-warning on unmanaged Macs (though strict MDM may still require IT approval).
+See **[docs/INSTALL.md](docs/INSTALL.md)** for all options (build from source, removing
+the quarantine flag, and "Open Anyway"), plus what to do if a strict MDM blocks them.
 
 ## Why it exists
 
