@@ -1,22 +1,55 @@
 import Foundation
+import AppKit
 import UniformTypeIdentifiers
 
 /// Turns dropped items into file URLs the (sandboxed) app can actually read and send.
 ///
-/// Real files are used in place. File *promises* and raw image/data drops — e.g. an
-/// image dragged from Safari/Preview or a pasted screenshot (which macOS names
-/// "PNG image.png" and would otherwise try to write into a forbidden folder like
-/// Documents) — are materialized into the app's own container temp, which is always
-/// writable under App Sandbox.
+/// Handles, in order: **file promises** (a `.docx` dragged from Mail/Word/a browser or
+/// an iCloud folder — where the source app would otherwise write into a sandbox-
+/// forbidden folder like Documents), then real files (used in place), then other file
+/// representations, then raw image/data drops (e.g. a pasted screenshot macOS names
+/// "PNG image.png"). Everything that isn't a directly-readable file is materialized
+/// into the app's own container temp, which is always writable under App Sandbox.
 enum DropMaterializer {
     static func materialize(_ providers: [NSItemProvider]) async -> [URL] {
         var urls: [URL] = []
         for provider in providers {
-            if let u = await directFileURL(provider) { urls.append(u) }
-            else if let u = await copiedFileRepresentation(provider) { urls.append(u) }
-            else if let u = await imageData(provider) { urls.append(u) }
+            let promised = await promisedFiles(provider)
+            if !promised.isEmpty { urls.append(contentsOf: promised); continue }
+            if let u = await directFileURL(provider) { urls.append(u); continue }
+            if let u = await copiedFileRepresentation(provider) { urls.append(u); continue }
+            if let u = await imageData(provider) { urls.append(u) }
         }
         return urls
+    }
+
+    /// A drag promise (NSFilePromiseProvider). We tell the source app to write the
+    /// file(s) into OUR container temp, so it never tries (and fails) to write into a
+    /// sandbox-forbidden folder.
+    private static func promisedFiles(_ p: NSItemProvider) async -> [URL] {
+        guard p.canLoadObject(ofClass: NSFilePromiseReceiver.self) else { return [] }
+        let receiver: NSFilePromiseReceiver? = await withCheckedContinuation { cont in
+            _ = p.loadObject(ofClass: NSFilePromiseReceiver.self) { obj, _ in
+                cont.resume(returning: obj as? NSFilePromiseReceiver)
+            }
+        }
+        guard let receiver, !receiver.fileNames.isEmpty else { return [] }
+        let expected = receiver.fileNames.count
+        let dir = dropDir()
+        let queue = OperationQueue()
+        return await withCheckedContinuation { (cont: CheckedContinuation<[URL], Never>) in
+            var results: [URL] = []
+            var completed = 0
+            let lock = NSLock()
+            receiver.receivePromisedFiles(atDestination: dir, options: [:], operationQueue: queue) { url, error in
+                lock.lock()
+                completed += 1
+                if error == nil { results.append(url) }
+                let done = completed >= expected
+                lock.unlock()
+                if done { cont.resume(returning: results) }
+            }
+        }
     }
 
     private static func dropDir() -> URL {
