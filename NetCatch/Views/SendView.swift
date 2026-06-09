@@ -12,6 +12,7 @@ struct SendView: View {
     @State private var showImporter = false
     @State private var manualHost = ""
     @State private var manualPort = ""
+    @State private var localIP: String?
 
     private var urls: [URL] { model.pendingSendURLs }
 
@@ -26,7 +27,11 @@ struct SendView: View {
             .padding(22)
         }
         .navigationTitle("Send")
-        .onAppear { compress = settings.compressByDefault }
+        .onAppear {
+            compress = settings.compressByDefault
+            localIP = LocalNetwork.ipv4Address()
+            if manualPort.isEmpty { manualPort = String(settings.port) }
+        }
         .fileImporter(isPresented: $showImporter, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
             if case let .success(picked) = result { model.pendingSendURLs = picked }
         }
@@ -139,20 +144,26 @@ struct SendView: View {
 
     private var manualSection: some View {
         DisclosureGroup("Send to an IP address") {
-            HStack {
-                TextField("Host (e.g. 192.168.1.20)", text: $manualHost)
-                TextField("Port", text: $manualPort)
-                    .frame(width: 80)
-                Button("Send") {
-                    let port = UInt16(manualPort) ?? settings.port
-                    if let peer = Peer.manual(host: manualHost, port: port) {
-                        manager.send(urls: urls, to: peer, compress: compress)
-                        model.pendingSendURLs = []
-                    }
+            VStack(alignment: .leading, spacing: 6) {
+                if let ip = localIP {
+                    Text("Your Mac: \(ip):\(settings.port) — others can send to you here. The other Mac listens on its own port (default \(settings.port)).")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
-                .disabled(urls.isEmpty || manualHost.isEmpty)
+                HStack {
+                    TextField("Host (e.g. 192.168.1.20)", text: $manualHost)
+                    TextField("Port", text: $manualPort)
+                        .frame(width: 80)
+                    Button("Send") {
+                        let port = UInt16(manualPort) ?? settings.port
+                        if let peer = Peer.manual(host: manualHost, port: port) {
+                            manager.send(urls: urls, to: peer, compress: compress)
+                            model.pendingSendURLs = []
+                        }
+                    }
+                    .disabled(urls.isEmpty || manualHost.isEmpty)
+                }
+                .textFieldStyle(.roundedBorder)
             }
-            .textFieldStyle(.roundedBorder)
             .padding(.top, 6)
         }
         .font(.headline)

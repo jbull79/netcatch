@@ -1,9 +1,12 @@
 import SwiftUI
+import AppKit
 
 struct ContentView: View {
     @EnvironmentObject private var manager: TransferManager
     @EnvironmentObject private var receiver: ReceiverServer
     @EnvironmentObject private var settings: AppSettings
+
+    @State private var localIP: String?
 
     enum Section: String, CaseIterable, Identifiable {
         case send = "Send"
@@ -52,21 +55,44 @@ struct ContentView: View {
     }
 
     private var statusFooter: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(receiver.isRunning ? Color.green : Color.orange)
-                .frame(width: 9, height: 9)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(settings.deviceName)
-                    .font(.caption).fontWeight(.medium)
-                    .lineLimit(1)
-                Text(receiver.isRunning ? "Discoverable" : "Offline")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(receiver.isRunning ? Color.green : Color.orange)
+                    .frame(width: 9, height: 9)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(settings.deviceName)
+                        .font(.caption).fontWeight(.medium)
+                        .lineLimit(1)
+                    Text(receiver.isRunning ? "Discoverable" : "Offline")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
             }
-            Spacer()
+            addressLabel
         }
         .padding(10)
         .background(.thinMaterial)
+        .onAppear { localIP = LocalNetwork.ipv4Address() }
+    }
+
+    @ViewBuilder private var addressLabel: some View {
+        if let ip = localIP {
+            let address = "\(ip):\(settings.port)"
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(address, forType: .string)
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "antenna.radiowaves.left.and.right")
+                    Text(address).font(.system(.caption2, design: .monospaced))
+                    Image(systemName: "doc.on.doc").font(.system(size: 9))
+                }
+                .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Your address — others can send to you here. Click to copy.")
+        }
     }
 }

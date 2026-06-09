@@ -7,6 +7,7 @@ struct SettingsView: View {
     @EnvironmentObject private var trust: TrustStore
 
     @State private var portText = ""
+    @State private var localIP: String?
 
     var body: some View {
         TabView {
@@ -14,7 +15,10 @@ struct SettingsView: View {
             devices.tabItem { Label("Devices", systemImage: "checkmark.shield") }
         }
         .frame(width: 460, height: 360)
-        .onAppear { portText = String(settings.port) }
+        .onAppear {
+            portText = String(settings.port)
+            localIP = LocalNetwork.ipv4Address()
+        }
     }
 
     private var general: some View {
@@ -27,6 +31,13 @@ struct SettingsView: View {
                     Button("Apply") {
                         if let p = UInt16(portText) { settings.port = p }
                         manager.restartServices()
+                    }
+                }
+                if let ip = localIP {
+                    LabeledContent("Address") {
+                        Text("\(ip):\(settings.port)")
+                            .font(.system(.body, design: .monospaced))
+                            .textSelection(.enabled)
                     }
                 }
             }
