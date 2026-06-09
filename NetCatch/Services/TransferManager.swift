@@ -81,6 +81,12 @@ final class TransferManager: ObservableObject {
 
         var prepared: [PreparedItem] = []
         do {
+            // Source URLs from the "Choose…" panel / Finder are security-scoped: under
+            // App Sandbox we must hold access while reading them to package the send,
+            // otherwise the read is denied. (Held for the whole transfer.)
+            let scopedSources = urls.filter { $0.startAccessingSecurityScopedResource() }
+            defer { scopedSources.forEach { $0.stopAccessingSecurityScopedResource() } }
+
             prepared = try await Task.detached(priority: .userInitiated) {
                 try urls.map { try ArchiveService.prepare(url: $0, compressRequested: compress) }
             }.value
