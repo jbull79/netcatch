@@ -31,17 +31,30 @@ private let maxFrameSize = 16 * 1024 * 1024
 /// Low-level async framing over an NWConnection.
 extension NWConnection {
     func startAndWaitReady() async throws {
+        let endpointDesc = "\(self.endpoint)"
+        DebugLog.log("connect: starting → \(endpointDesc)")
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             self.stateUpdateHandler = { [weak self] state in
                 switch state {
+                case .preparing:
+                    DebugLog.log("connect: preparing → \(endpointDesc)")
                 case .ready:
+                    let ifaces = self?.currentPath?.availableInterfaces.map(\.name).joined(separator: ",") ?? "?"
+                    DebugLog.log("connect: ready (interfaces: \(ifaces))")
                     self?.stateUpdateHandler = nil
                     cont.resume()
-                case .failed(let error), .waiting(let error):
+                case .waiting(let error):
+                    DebugLog.log("connect: waiting — \(error)", .warn)
+                    self?.stateUpdateHandler = nil
+                    self?.cancel()
+                    cont.resume(throwing: error)
+                case .failed(let error):
+                    DebugLog.log("connect: failed — \(error)", .error)
                     self?.stateUpdateHandler = nil
                     self?.cancel()
                     cont.resume(throwing: error)
                 case .cancelled:
+                    DebugLog.log("connect: cancelled", .warn)
                     self?.stateUpdateHandler = nil
                     cont.resume(throwing: LinkError.closed)
                 default:

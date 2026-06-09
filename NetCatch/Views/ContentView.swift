@@ -9,12 +9,14 @@ struct ContentView: View {
         case send = "Send"
         case activity = "Activity"
         case history = "History"
+        case logs = "Logs"
         var id: String { rawValue }
         var icon: String {
             switch self {
             case .send: return "paperplane.fill"
             case .activity: return "arrow.up.arrow.down.circle.fill"
             case .history: return "clock.fill"
+            case .logs: return "doc.text.magnifyingglass"
             }
         }
     }
@@ -45,6 +47,7 @@ struct ContentView: View {
         case .send: SendView()
         case .activity: ActivityView()
         case .history: HistoryView()
+        case .logs: LogsView()
         }
     }
 

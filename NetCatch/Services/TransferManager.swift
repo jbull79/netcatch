@@ -56,6 +56,7 @@ final class TransferManager: ObservableObject {
     }
 
     func startServices() {
+        DebugLog.log("services: starting as '\(settings.deviceName)', listen port \(settings.port)")
         discovery.ownServiceName = settings.deviceName
         receiver.start(serviceName: settings.deviceName, port: settings.port)
         discovery.start()
@@ -78,6 +79,7 @@ final class TransferManager: ObservableObject {
         let transfer = Transfer(direction: .send, peerName: peer.name, items: [], totalBytes: 0)
         transfer.state = .connecting
         transfers.insert(transfer, at: 0)
+        DebugLog.log("send: starting → '\(peer.name)' endpoint=\(peer.endpoint) compress=\(compress)")
 
         var prepared: [PreparedItem] = []
         do {
@@ -103,9 +105,12 @@ final class TransferManager: ObservableObject {
             try await link.handshake(localName: settings.deviceName)
             transfer.peerName = link.remoteName == "Unknown" ? peer.name : link.remoteName
             transfer.peerFingerprint = link.remoteFingerprint
+            DebugLog.log("send: handshake ok, peer=\(link.remoteName) fp=\(link.remoteFingerprint)")
 
             try await link.sendSecureObject(header)
+            DebugLog.log("send: header sent (\(header.items.count) item(s), \(header.totalTransmitted) bytes) — awaiting accept")
             let decision = try await link.receiveSecureObject(TransferDecision.self)
+            DebugLog.log("send: peer accepted=\(decision.accepted)")
             guard decision.accepted else {
                 transfer.state = .rejected
                 link.cancel()
@@ -125,8 +130,10 @@ final class TransferManager: ObservableObject {
             // final bytes are never dropped by an early teardown.
             _ = try await link.receiveSecureObject(TransferAck.self)
             link.cancel()
+            DebugLog.log("send: complete → '\(transfer.primaryName)' to \(transfer.peerName)")
             finish(transfer, succeeded: true)
         } catch {
+            DebugLog.log("send: FAILED — \(error.localizedDescription) [\(error)]", .error)
             fail(transfer, error)
         }
         cleanup(prepared)
@@ -165,7 +172,9 @@ final class TransferManager: ObservableObject {
         do {
             try await link.start()
             try await link.handshake(localName: settings.deviceName)
+            DebugLog.log("receive: handshake ok from \(link.remoteName) fp=\(link.remoteFingerprint)")
             let header = try await link.receiveSecureObject(TransferHeader.self)
+            DebugLog.log("receive: header (\(header.items.count) item(s), \(header.totalTransmitted) bytes) from \(header.senderName)")
             // Reject a malformed sha256 before it is ever used as a partial-file name
             // (path-traversal guard on the untrusted header).
             guard header.items.allSatisfy({ PartialStore.isValidSHA256($0.sha256) }) else {
@@ -208,9 +217,11 @@ final class TransferManager: ObservableObject {
             _ = try? await link.receiveSecure()
             link.cancel()
             finish(transfer, succeeded: true)
+            DebugLog.log("receive: complete → saved '\(transfer.primaryName)' from \(transfer.peerName)")
             NotificationService.notify(title: "Received from \(transfer.peerName)",
                                        body: transfer.primaryName)
         } catch {
+            DebugLog.log("receive: FAILED — \(error.localizedDescription) [\(error)]", .error)
             fail(transfer, error)
             link.cancel()
         }

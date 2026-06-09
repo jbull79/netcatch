@@ -29,6 +29,12 @@ final class ReceiverServer: ObservableObject {
             listener.service = NWListener.Service(name: serviceName, type: serviceType)
 
             listener.stateUpdateHandler = { [weak self] state in
+                switch state {
+                case .ready: DebugLog.log("listener: ready on port \(port) as '\(serviceName)'")
+                case .failed(let error): DebugLog.log("listener: failed — \(error)", .error)
+                case .cancelled: DebugLog.log("listener: cancelled", .warn)
+                default: break
+                }
                 Task { @MainActor in
                     switch state {
                     case .ready: self?.isRunning = true
@@ -43,6 +49,7 @@ final class ReceiverServer: ObservableObject {
             }
 
             listener.newConnectionHandler = { [weak self] connection in
+                DebugLog.log("listener: incoming connection from \(connection.endpoint)")
                 Task { @MainActor in
                     self?.onIncoming?(connection)
                 }
