@@ -259,11 +259,28 @@ final class TransferManager: ObservableObject {
             let target = decision.directory.appendingPathComponent(baseName)
             guard Self.isContained(target, in: decision.directory) else { throw LinkError.malformed }
             let destination = uniqueURL(target)
-            try await Task.detached(priority: .userInitiated) {
-                try ArchiveService.reconstruct(item: item, blobURL: partURL, to: destination)
-            }.value
+
+            let savedURL: URL
+            do {
+                try await Task.detached(priority: .userInitiated) {
+                    try ArchiveService.reconstruct(item: item, blobURL: partURL, to: destination)
+                }.value
+                savedURL = destination
+            } catch let error as NSError where error.domain == NSCocoaErrorDomain
+                && error.code == NSFileWriteNoPermissionError {
+                // App Sandbox blocked the chosen folder (e.g. Documents) — fall back to
+                // Downloads, which is always granted, rather than failing the transfer.
+                let downloads = try FileManager.default.url(for: .downloadsDirectory,
+                                                            in: .userDomainMask,
+                                                            appropriateFor: nil, create: true)
+                let fallback = uniqueURL(downloads.appendingPathComponent(baseName))
+                try await Task.detached(priority: .userInitiated) {
+                    try ArchiveService.reconstruct(item: item, blobURL: partURL, to: fallback)
+                }.value
+                savedURL = fallback
+            }
             PartialStore.remove(sha: item.sha256)        // completed — drop the partial
-            if firstDestination == nil { firstDestination = destination }
+            if firstDestination == nil { firstDestination = savedURL }
             transfer.state = .transferring
         }
         return firstDestination ?? decision.directory

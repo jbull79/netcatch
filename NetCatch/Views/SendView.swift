@@ -57,12 +57,13 @@ struct SendView: View {
                 .strokeBorder(style: StrokeStyle(lineWidth: 2, dash: [8]))
                 .foregroundStyle(isTargeted ? Color.accentColor : Color.secondary.opacity(0.4))
         )
-        .dropDestination(for: URL.self) { dropped, _ in
-            let files = dropped.filter { $0.isFileURL }
-            guard !files.isEmpty else { return false }
-            model.pendingSendURLs = files
+        .onDrop(of: [.item], isTargeted: $isTargeted) { providers in
+            Task { @MainActor in
+                let urls = await DropMaterializer.materialize(providers)
+                if !urls.isEmpty { model.pendingSendURLs = urls }
+            }
             return true
-        } isTargeted: { isTargeted = $0 }
+        }
     }
 
     // MARK: Selected items
