@@ -19,3 +19,6 @@ xcuserdata/
 
 # Misc
 *.swp
+
+# Release artifacts
+NetCatch-*.zip

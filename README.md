@@ -12,6 +12,34 @@ page, unzip, and move **NetCatch.app** to `/Applications`. Requires macOS 14+.
 > The app is ad-hoc signed (not notarized). On first launch, right-click the app →
 > **Open**, or allow it under System Settings → Privacy & Security.
 
+### Opening on a locked-down / managed Mac
+
+Because the app isn't notarized yet, Gatekeeper may report
+*"Apple could not verify 'NetCatch.app' is free from malware."* On a personal Mac the
+right-click → **Open** (or **Privacy & Security → Open Anyway**) handles it. On a
+managed/work Mac those overrides are often disabled by IT policy — try these in order:
+
+1. **Build from source (no warning at all).** Apps you compile yourself are never
+   quarantined, so Gatekeeper doesn't block them:
+   ```sh
+   git clone https://github.com/jbull79/netcatch
+   cd netcatch
+   xcodebuild -scheme NetCatch -configuration Release build
+   open ~/Library/Developer/Xcode/DerivedData/NetCatch-*/Build/Products/Release/NetCatch.app
+   ```
+   Requires Xcode or Command Line Tools (`xcode-select --install`).
+
+2. **Remove the quarantine flag** (needs Terminal access):
+   ```sh
+   xattr -dr com.apple.quarantine /path/to/NetCatch.app
+   ```
+
+3. **System Settings → Privacy & Security → "Open Anyway"** — may be greyed out by MDM.
+
+If all three are blocked, that's your Mac's management policy; only your **IT team can
+whitelist** the app. A future [notarized](docs/NOTARIZATION.md) build removes the
+warning on unmanaged Macs (though strict MDM may still require IT approval).
+
 ## Why it exists
 
 Quickly beam a file or folder to another Mac on the same Wi-Fi/LAN, with a nice UI,
