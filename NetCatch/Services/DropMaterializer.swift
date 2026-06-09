@@ -27,9 +27,12 @@ enum DropMaterializer {
     /// file(s) into OUR container temp, so it never tries (and fails) to write into a
     /// sandbox-forbidden folder.
     private static func promisedFiles(_ p: NSItemProvider) async -> [URL] {
-        guard p.canLoadObject(ofClass: NSFilePromiseReceiver.self) else { return [] }
+        // Use the NSItemProviderReading overload (NSFilePromiseReceiver isn't
+        // _ObjectiveCBridgeable, so the generic canLoadObject<T> doesn't apply).
+        let readerClass: NSItemProviderReading.Type = NSFilePromiseReceiver.self
+        guard p.canLoadObject(ofClass: readerClass) else { return [] }
         let receiver: NSFilePromiseReceiver? = await withCheckedContinuation { cont in
-            _ = p.loadObject(ofClass: NSFilePromiseReceiver.self) { obj, _ in
+            _ = p.loadObject(ofClass: readerClass) { obj, _ in
                 cont.resume(returning: obj as? NSFilePromiseReceiver)
             }
         }
