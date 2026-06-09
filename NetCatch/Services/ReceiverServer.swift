@@ -18,8 +18,10 @@ final class ReceiverServer: ObservableObject {
         stop()
         do {
             // Listen over plain infrastructure TCP (like netcat). Still advertised via
-            // Bonjour over the shared network; no AWDL/peer-to-peer.
+            // Bonjour over the shared network; no AWDL/peer-to-peer, and avoid VPN/
+            // virtual interfaces (.other) so replies aren't routed into a VPN tunnel.
             let params = NWParameters.tcp
+            params.prohibitedInterfaceTypes = [.other]
             let listener: NWListener
             if let nwPort = NWEndpoint.Port(rawValue: port) {
                 listener = try NWListener(using: params, on: nwPort)
