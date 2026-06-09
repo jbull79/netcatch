@@ -95,8 +95,9 @@ final class TransferManager: ObservableObject {
             transfer.items = header.items
             transfer.totalBytes = header.totalTransmitted
 
+            // Plain infrastructure TCP — like netcat. Peer-to-peer (AWDL) was causing
+            // the socket to fail to connect (NWError 57) on normal shared Wi-Fi.
             let params = NWParameters.tcp
-            params.includePeerToPeer = true
             let link = PeerLink(connection: NWConnection(to: peer.endpoint, using: params))
             try await link.start()
             try await link.handshake(localName: settings.deviceName)

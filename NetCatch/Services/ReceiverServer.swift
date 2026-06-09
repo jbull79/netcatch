@@ -17,8 +17,9 @@ final class ReceiverServer: ObservableObject {
     func start(serviceName: String, port: UInt16) {
         stop()
         do {
+            // Listen over plain infrastructure TCP (like netcat). Still advertised via
+            // Bonjour over the shared network; no AWDL/peer-to-peer.
             let params = NWParameters.tcp
-            params.includePeerToPeer = true
             let listener: NWListener
             if let nwPort = NWEndpoint.Port(rawValue: port) {
                 listener = try NWListener(using: params, on: nwPort)
