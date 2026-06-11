@@ -22,13 +22,8 @@ enum LinkError: Error, LocalizedError {
     }
 }
 
-/// Largest single frame we will allocate for / accept. Payload chunks are 256 KB;
-/// the header JSON for large batches is still well under this. Anything bigger is
-/// treated as malformed, preventing a hostile length prefix from forcing a huge
-/// allocation (memory-exhaustion DoS).
-private let maxFrameSize = 16 * 1024 * 1024
-
-/// Low-level async framing over an NWConnection.
+/// Brings an `NWConnection` to `.ready`. Still used by the Network.framework transport
+/// strategy and by Bonjour endpoint resolution.
 extension NWConnection {
     func startAndWaitReady() async throws {
         let endpointDesc = "\(self.endpoint)"
@@ -64,69 +59,24 @@ extension NWConnection {
             self.start(queue: .global(qos: .userInitiated))
         }
     }
-
-    func sendData(_ data: Data) async throws {
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            self.send(content: data, completion: .contentProcessed { error in
-                if let error { cont.resume(throwing: error) } else { cont.resume() }
-            })
-        }
-    }
-
-    /// Reads exactly `count` bytes or throws `LinkError.closed` on EOF.
-    func receiveExact(_ count: Int) async throws -> Data {
-        if count == 0 { return Data() }
-        var buffer = Data()
-        buffer.reserveCapacity(count)
-        while buffer.count < count {
-            let remaining = count - buffer.count
-            let chunk: Data = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, Error>) in
-                self.receive(minimumIncompleteLength: 1, maximumLength: remaining) { data, _, isComplete, error in
-                    if let error { cont.resume(throwing: error); return }
-                    if let data, !data.isEmpty { cont.resume(returning: data); return }
-                    cont.resume(throwing: LinkError.closed)
-                    _ = isComplete
-                }
-            }
-            buffer.append(chunk)
-        }
-        return buffer
-    }
-
-    func sendFrame(_ data: Data) async throws {
-        var length = UInt32(data.count).bigEndian
-        var frame = Data(bytes: &length, count: 4)
-        frame.append(data)
-        try await sendData(frame)
-    }
-
-    func receiveFrame() async throws -> Data {
-        let header = try await receiveExact(4)
-        let length = header.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.bigEndian
-        guard length <= maxFrameSize else { throw LinkError.malformed }
-        return try await receiveExact(Int(length))
-    }
 }
 
-/// An encrypted, framed peer connection. After `handshake()` all frames are
-/// AES-GCM sealed with the negotiated session key.
+/// An encrypted, framed peer connection over any `ByteStream`. After `handshake()` all
+/// frames are AES-GCM sealed with the negotiated session key.
 final class PeerLink {
-    let connection: NWConnection
+    let stream: ByteStream
     private(set) var sessionKey: SymmetricKey?
     private(set) var remoteName: String = "Unknown"
     private(set) var remoteFingerprint: String = ""
 
-    init(connection: NWConnection) {
-        self.connection = connection
-    }
+    init(stream: ByteStream) { self.stream = stream }
 
-    func start() async throws {
-        try await connection.startAndWaitReady()
-    }
+    /// Convenience for the NWListener fallback path.
+    convenience init(connection: NWConnection) { self.init(stream: NWByteStream(connection)) }
 
-    func cancel() {
-        connection.cancel()
-    }
+    func start() async throws { try await stream.open() }
+
+    func cancel() { stream.close() }
 
     /// Exchange signed ephemeral + identity keys, verify the peer's signature, and
     /// derive the session key. Each side signs its ephemeral key with its long-term
@@ -143,9 +93,9 @@ final class PeerLink {
                                  nonce: nonce,
                                  name: localName,
                                  signature: signature)
-        try await connection.sendFrame(try JSONEncoder().encode(outgoing))
+        try await stream.sendFrame(try JSONEncoder().encode(outgoing))
 
-        let incomingData = try await connection.receiveFrame()
+        let incomingData = try await stream.receiveFrame()
         let incoming = try JSONDecoder().decode(Handshake.self, from: incomingData)
 
         // Verify the peer holds the identity private key behind its fingerprint and
@@ -164,12 +114,12 @@ final class PeerLink {
 
     func sendSecure(_ data: Data) async throws {
         guard let key = sessionKey else { throw LinkError.notReady }
-        try await connection.sendFrame(try CryptoService.seal(data, key: key))
+        try await stream.sendFrame(try CryptoService.seal(data, key: key))
     }
 
     func receiveSecure() async throws -> Data {
         guard let key = sessionKey else { throw LinkError.notReady }
-        return try CryptoService.open(try await connection.receiveFrame(), key: key)
+        return try CryptoService.open(try await stream.receiveFrame(), key: key)
     }
 
     // MARK: Codable helpers

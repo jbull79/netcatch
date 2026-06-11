@@ -55,29 +55,23 @@ final class TransferManager: ObservableObject {
     init(settings: AppSettings, history: HistoryStore) {
         self.settings = settings
         self.history = history
-        receiver.onIncoming = { [weak self] connection in
-            self?.handleIncoming(connection)
+        receiver.onIncoming = { [weak self] link in
+            self?.handleIncoming(link)
         }
     }
 
     func startServices() {
         DebugLog.log("services: starting as '\(settings.deviceName)', listen port \(settings.port)")
         discovery.ownServiceName = settings.deviceName
+        receiver.start(serviceName: settings.deviceName, port: settings.port)
         discovery.start()
         NotificationService.requestAuthorization()
-        // Resolve the physical LAN interface first, then start the listener pinned to it
-        // so accepted connections never reply over a VPN tunnel.
-        Task { [weak self] in
-            guard let self else { return }
-            let iface = await LocalNetwork.lanInterface()
-            self.receiver.start(serviceName: self.settings.deviceName, port: self.settings.port,
-                                requiredInterface: iface)
-        }
     }
 
     func restartServices() {
         receiver.stop()
         discovery.stop()
+        TransportConnector.shared.resetCache()   // network may have changed; re-probe transports
         startServices()
     }
 
@@ -130,25 +124,15 @@ final class TransferManager: ObservableObject {
             transfer.items = header.items
             transfer.totalBytes = header.totalTransmitted
 
-            // Plain infrastructure TCP — like netcat. No AWDL/peer-to-peer, and avoid
-            // VPN/virtual interfaces (.other) so LAN traffic isn't pulled into a VPN
-            // tunnel (which broke the return path → NWError 57/50).
-            let params = NWParameters.tcp
-            params.prohibitedInterfaceTypes = [.other]
-            // Pin to the physical LAN interface (e.g. en0) so a VPN tunnel can't capture
-            // LAN traffic — routes like netcat instead of drifting onto the VPN.
-            if let iface = await LocalNetwork.lanInterface() {
-                params.requiredInterface = iface
-                DebugLog.log("send: pinned to interface \(iface.name)")
-            }
-            let link = PeerLink(connection: NWConnection(to: peer.endpoint, using: params))
-            activeLinks[transfer.id] = link
+            // Adaptively pick the transport that actually reaches this peer (raw POSIX
+            // socket first — routes like netcat through a VPN — then Network.framework
+            // variants), validated through the handshake and cached per peer.
             try Task.checkCancellation()
-            try await link.start()
-            try await link.handshake(localName: settings.deviceName)
+            let link = try await TransportConnector.shared.connect(to: peer, localName: settings.deviceName)
+            activeLinks[transfer.id] = link
             transfer.peerName = link.remoteName == "Unknown" ? peer.name : link.remoteName
             transfer.peerFingerprint = link.remoteFingerprint
-            DebugLog.log("send: handshake ok, peer=\(link.remoteName) fp=\(link.remoteFingerprint)")
+            DebugLog.log("send: connected + handshake ok, peer=\(link.remoteName) fp=\(link.remoteFingerprint)")
 
             try await link.sendSecureObject(header)
             DebugLog.log("send: header sent (\(header.items.count) item(s), \(header.totalTransmitted) bytes) — awaiting accept")
@@ -214,8 +198,7 @@ final class TransferManager: ObservableObject {
 
     // MARK: Receiving
 
-    private func handleIncoming(_ connection: NWConnection) {
-        let link = PeerLink(connection: connection)
+    private func handleIncoming(_ link: PeerLink) {
         let transfer = Transfer(direction: .receive, peerName: "Incoming…", items: [], totalBytes: 0)
         activeLinks[transfer.id] = link
         let task = Task { [weak self] in
