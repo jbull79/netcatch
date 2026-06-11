@@ -3,17 +3,29 @@ import Charts
 import AppKit
 
 struct TransferRow: View {
+    @EnvironmentObject private var manager: TransferManager
     @ObservedObject var transfer: Transfer
+
+    /// A live transfer (send or receive) can be cancelled while it is connecting or
+    /// moving bytes. We exclude the approval wait, where the accept sheet is in charge.
+    private var canCancel: Bool {
+        switch transfer.state {
+        case .connecting, .transferring, .verifying: return true
+        default: return false
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             header
             if transfer.state == .transferring || transfer.state == .verifying {
                 progressSection
-                if transfer.samples.count > 1 { chart }
             } else {
                 statusLine
             }
+            // Keep the throughput graph visible during AND after the transfer, so a
+            // quick LAN transfer's rate doesn't vanish the instant it finishes.
+            if transfer.samples.count > 1 { chart }
         }
         .padding(14)
         .background(RoundedRectangle(cornerRadius: 12).fill(Color.secondary.opacity(0.06)))
@@ -32,6 +44,16 @@ struct TransferRow: View {
             }
             Spacer()
             stateBadge
+            if canCancel {
+                Button {
+                    manager.cancel(transfer)
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Cancel this send")
+            }
         }
     }
 
@@ -44,6 +66,8 @@ struct TransferRow: View {
                 Label("Failed", systemImage: "exclamationmark.triangle.fill").foregroundStyle(.red)
             case .rejected:
                 Label("Declined", systemImage: "hand.raised.fill").foregroundStyle(.orange)
+            case .cancelled:
+                Label("Cancelled", systemImage: "xmark.circle.fill").foregroundStyle(.orange)
             case .awaitingApproval:
                 Label("Waiting", systemImage: "hourglass").foregroundStyle(.secondary)
             case .connecting:
@@ -91,13 +115,17 @@ struct TransferRow: View {
         .frame(height: 70)
     }
 
+    private var throughputSummary: String {
+        "avg \(Format.rate(transfer.averageThroughput)) · peak \(Format.rate(transfer.peakThroughput))"
+    }
+
     @ViewBuilder private var statusLine: some View {
         switch transfer.state {
         case .failed(let message):
             Text(message).font(.caption).foregroundStyle(.red)
         case .completed where transfer.savedLocation != nil:
             HStack {
-                Text("Saved \(Format.bytes(transfer.totalBytes))")
+                Text("Saved \(Format.bytes(transfer.totalBytes)) · \(throughputSummary)")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button("Reveal in Finder") {
@@ -108,7 +136,10 @@ struct TransferRow: View {
                 .buttonStyle(.link).font(.caption)
             }
         case .completed:
-            Text("Sent \(Format.bytes(transfer.totalBytes))")
+            Text("Sent \(Format.bytes(transfer.totalBytes)) · \(throughputSummary)")
+                .font(.caption).foregroundStyle(.secondary)
+        case .cancelled:
+            Text("Cancelled at \(Format.bytes(transfer.bytesTransferred)) of \(Format.bytes(transfer.totalBytes))")
                 .font(.caption).foregroundStyle(.secondary)
         default:
             EmptyView()

@@ -70,11 +70,31 @@ struct ContentView: View {
                 }
                 Spacer()
             }
+            liveThroughput
             addressLabel
         }
         .padding(10)
         .background(.thinMaterial)
         .onAppear { localIP = LocalNetwork.ipv4Address() }
+    }
+
+    /// Combined live transfer rate, always visible while anything is moving — polled on a
+    /// timer because each Transfer's throughput is nested observable state.
+    private var liveThroughput: some View {
+        TimelineView(.periodic(from: .now, by: 0.5)) { _ in
+            let active = manager.transfers.filter { $0.state == .transferring }
+            let rate = active.reduce(0.0) { $0 + $1.throughput }
+            if !active.isEmpty {
+                HStack(spacing: 5) {
+                    Image(systemName: "speedometer")
+                    Text(Format.rate(rate)).font(.system(.caption2, design: .monospaced))
+                    if active.count > 1 {
+                        Text("· \(active.count) active").font(.caption2)
+                    }
+                }
+                .foregroundStyle(.tint)
+            }
+        }
     }
 
     @ViewBuilder private var addressLabel: some View {

@@ -47,6 +47,11 @@ final class TransferManager: ObservableObject {
 
     private let chunkSize = 256 * 1024
 
+    /// In-flight transfer tasks and their links, keyed by transfer id, so either a
+    /// send or a receive can be cancelled mid-flight.
+    private var tasks: [UUID: Task<Void, Never>] = [:]
+    private var activeLinks: [UUID: PeerLink] = [:]
+
     init(settings: AppSettings, history: HistoryStore) {
         self.settings = settings
         self.history = history
@@ -72,13 +77,34 @@ final class TransferManager: ObservableObject {
     // MARK: Sending
 
     func send(urls: [URL], to peer: Peer, compress: Bool) {
-        Task { await runSend(urls: urls, peer: peer, compress: compress) }
-    }
-
-    private func runSend(urls: [URL], peer: Peer, compress: Bool) async {
         let transfer = Transfer(direction: .send, peerName: peer.name, items: [], totalBytes: 0)
         transfer.state = .connecting
         transfers.insert(transfer, at: 0)
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.runSend(transfer: transfer, urls: urls, peer: peer, compress: compress)
+        }
+        tasks[transfer.id] = task
+    }
+
+    /// Cancel an in-flight transfer (send or receive): tears down the connection and the
+    /// task. On a send, the receiver fails on the dropped connection but keeps any partial
+    /// for a later resume; on a receive, our own partial is likewise kept.
+    func cancel(_ transfer: Transfer) {
+        guard transfer.state.isActive else { return }
+        let role = transfer.direction == .send ? "send" : "receive"
+        DebugLog.log("\(role): cancel requested for '\(transfer.primaryName)' (\(transfer.peerName))", .warn)
+        transfer.state = .cancelled
+        transfer.finishTiming()
+        activeLinks[transfer.id]?.cancel()
+        tasks[transfer.id]?.cancel()
+    }
+
+    private func runSend(transfer: Transfer, urls: [URL], peer: Peer, compress: Bool) async {
+        defer {
+            tasks[transfer.id] = nil
+            activeLinks[transfer.id] = nil
+        }
         DebugLog.log("send: starting → '\(peer.name)' endpoint=\(peer.endpoint) compress=\(compress)")
 
         var prepared: [PreparedItem] = []
@@ -103,6 +129,8 @@ final class TransferManager: ObservableObject {
             let params = NWParameters.tcp
             params.prohibitedInterfaceTypes = [.other]
             let link = PeerLink(connection: NWConnection(to: peer.endpoint, using: params))
+            activeLinks[transfer.id] = link
+            try Task.checkCancellation()
             try await link.start()
             try await link.handshake(localName: settings.deviceName)
             transfer.peerName = link.remoteName == "Unknown" ? peer.name : link.remoteName
@@ -134,9 +162,17 @@ final class TransferManager: ObservableObject {
             link.cancel()
             DebugLog.log("send: complete → '\(transfer.primaryName)' to \(transfer.peerName)")
             finish(transfer, succeeded: true)
+        } catch is CancellationError {
+            markCancelled(transfer)
         } catch {
-            DebugLog.log("send: FAILED — \(error.localizedDescription) [\(error)]", .error)
-            fail(transfer, error)
+            // A user-requested cancel tears down the link, surfacing as a connection
+            // error here — treat it as a cancellation, not a failure.
+            if transfer.state == .cancelled || Task.isCancelled {
+                markCancelled(transfer)
+            } else {
+                DebugLog.log("send: FAILED — \(error.localizedDescription) [\(error)]", .error)
+                fail(transfer, error)
+            }
         }
         cleanup(prepared)
     }
@@ -151,6 +187,7 @@ final class TransferManager: ObservableObject {
             transfer.advance(by: Int64(offset))   // count already-received bytes as done
         }
         while true {
+            try Task.checkCancellation()
             let chunk = (try handle.read(upToCount: chunkSize)) ?? Data()
             if chunk.isEmpty { break }
             var beOffset = offset.bigEndian
@@ -166,11 +203,20 @@ final class TransferManager: ObservableObject {
 
     private func handleIncoming(_ connection: NWConnection) {
         let link = PeerLink(connection: connection)
-        Task { await runReceive(link: link) }
+        let transfer = Transfer(direction: .receive, peerName: "Incoming…", items: [], totalBytes: 0)
+        activeLinks[transfer.id] = link
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.runReceive(transfer: transfer, link: link)
+        }
+        tasks[transfer.id] = task
     }
 
-    private func runReceive(link: PeerLink) async {
-        let transfer = Transfer(direction: .receive, peerName: "Incoming…", items: [], totalBytes: 0)
+    private func runReceive(transfer: Transfer, link: PeerLink) async {
+        defer {
+            tasks[transfer.id] = nil
+            activeLinks[transfer.id] = nil
+        }
         do {
             try await link.start()
             try await link.handshake(localName: settings.deviceName)
@@ -222,9 +268,18 @@ final class TransferManager: ObservableObject {
             DebugLog.log("receive: complete → saved '\(transfer.primaryName)' from \(transfer.peerName)")
             NotificationService.notify(title: "Received from \(transfer.peerName)",
                                        body: transfer.primaryName)
+        } catch is CancellationError {
+            markCancelled(transfer)
+            link.cancel()
         } catch {
-            DebugLog.log("receive: FAILED — \(error.localizedDescription) [\(error)]", .error)
-            fail(transfer, error)
+            // A user-requested cancel tears down the link, surfacing as a connection
+            // error here — treat it as a cancellation, not a failure.
+            if transfer.state == .cancelled || Task.isCancelled {
+                markCancelled(transfer)
+            } else {
+                DebugLog.log("receive: FAILED — \(error.localizedDescription) [\(error)]", .error)
+                fail(transfer, error)
+            }
             link.cancel()
         }
     }
@@ -249,6 +304,7 @@ final class TransferManager: ObservableObject {
             var received: Int64 = resumeOffset
             if resumeOffset > 0 { transfer.advance(by: resumeOffset) }   // already-held bytes count as done
             while received < item.transmittedSize {
+                try Task.checkCancellation()
                 let frame = try await link.receiveSecure()
                 guard frame.count >= 8 else { throw LinkError.malformed }
                 let offset = frame.prefix(8).withUnsafeBytes { $0.loadUnaligned(as: UInt64.self) }.bigEndian
@@ -331,7 +387,7 @@ final class TransferManager: ObservableObject {
 
     private func finish(_ transfer: Transfer, succeeded: Bool) {
         transfer.state = .completed
-        transfer.throughput = 0
+        transfer.finishTiming()
         history.add(HistoryRecord(date: Date(),
                                   directionIsSend: transfer.direction == .send,
                                   peerName: transfer.peerName,
@@ -340,9 +396,22 @@ final class TransferManager: ObservableObject {
                                   succeeded: succeeded))
     }
 
+    private func markCancelled(_ transfer: Transfer) {
+        transfer.state = .cancelled
+        transfer.finishTiming()
+        let role = transfer.direction == .send ? "send" : "receive"
+        DebugLog.log("\(role): cancelled '\(transfer.primaryName)' (\(transfer.peerName))", .warn)
+        history.add(HistoryRecord(date: Date(),
+                                  directionIsSend: transfer.direction == .send,
+                                  peerName: transfer.peerName,
+                                  summary: transfer.primaryName,
+                                  bytes: transfer.bytesTransferred,
+                                  succeeded: false))
+    }
+
     private func fail(_ transfer: Transfer, _ error: Error) {
         transfer.state = .failed(error.localizedDescription)
-        transfer.throughput = 0
+        transfer.finishTiming()
         history.add(HistoryRecord(date: Date(),
                                   directionIsSend: transfer.direction == .send,
                                   peerName: transfer.peerName,
