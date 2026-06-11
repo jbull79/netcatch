@@ -63,9 +63,16 @@ final class TransferManager: ObservableObject {
     func startServices() {
         DebugLog.log("services: starting as '\(settings.deviceName)', listen port \(settings.port)")
         discovery.ownServiceName = settings.deviceName
-        receiver.start(serviceName: settings.deviceName, port: settings.port)
         discovery.start()
         NotificationService.requestAuthorization()
+        // Resolve the physical LAN interface first, then start the listener pinned to it
+        // so accepted connections never reply over a VPN tunnel.
+        Task { [weak self] in
+            guard let self else { return }
+            let iface = await LocalNetwork.lanInterface()
+            self.receiver.start(serviceName: self.settings.deviceName, port: self.settings.port,
+                                requiredInterface: iface)
+        }
     }
 
     func restartServices() {
@@ -128,6 +135,12 @@ final class TransferManager: ObservableObject {
             // tunnel (which broke the return path → NWError 57/50).
             let params = NWParameters.tcp
             params.prohibitedInterfaceTypes = [.other]
+            // Pin to the physical LAN interface (e.g. en0) so a VPN tunnel can't capture
+            // LAN traffic — routes like netcat instead of drifting onto the VPN.
+            if let iface = await LocalNetwork.lanInterface() {
+                params.requiredInterface = iface
+                DebugLog.log("send: pinned to interface \(iface.name)")
+            }
             let link = PeerLink(connection: NWConnection(to: peer.endpoint, using: params))
             activeLinks[transfer.id] = link
             try Task.checkCancellation()

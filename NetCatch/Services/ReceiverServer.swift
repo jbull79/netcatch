@@ -14,7 +14,7 @@ final class ReceiverServer: ObservableObject {
     /// Called (on the main actor) for every new inbound connection.
     var onIncoming: ((NWConnection) -> Void)?
 
-    func start(serviceName: String, port: UInt16) {
+    func start(serviceName: String, port: UInt16, requiredInterface: NWInterface? = nil) {
         stop()
         do {
             // Listen over plain infrastructure TCP (like netcat). Still advertised via
@@ -22,6 +22,12 @@ final class ReceiverServer: ObservableObject {
             // virtual interfaces (.other) so replies aren't routed into a VPN tunnel.
             let params = NWParameters.tcp
             params.prohibitedInterfaceTypes = [.other]
+            // Pin to the physical LAN interface (e.g. en0) when known, so accepted
+            // connections reply over the LAN rather than a VPN tunnel.
+            if let iface = requiredInterface {
+                params.requiredInterface = iface
+                DebugLog.log("listener: pinned to interface \(iface.name)")
+            }
             let listener: NWListener
             if let nwPort = NWEndpoint.Port(rawValue: port) {
                 listener = try NWListener(using: params, on: nwPort)
