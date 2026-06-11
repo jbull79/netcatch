@@ -72,13 +72,17 @@ final class ReceiverServer: ObservableObject {
         lastError = nil
         DebugLog.log("listener: POSIX ready on port \(actualPort) as '\(serviceName)'")
 
-        // Accept loop on a background queue.
+        // Accept loop on a background queue. Capture the fd by value — never touch
+        // main-actor state (e.g. listenFD) from this thread, or Swift's exclusivity
+        // enforcement traps and the app crashes. The loop ends when stop() closes the
+        // socket and accept() returns an error.
         acceptQueue.async { [weak self] in
-            while let self, self.listenFD >= 0 {
-                let clientFD = accept(self.listenFD, nil, nil)
-                if clientFD < 0 { break }    // socket closed on stop()
+            while true {
+                let clientFD = accept(fd, nil, nil)
+                if clientFD < 0 { break }
                 let stream = POSIXByteStream(fd: clientFD)
                 Task { @MainActor in
+                    guard let self else { stream.close(); return }
                     DebugLog.log("listener: incoming POSIX connection")
                     self.onIncoming?(PeerLink(stream: stream))
                 }
