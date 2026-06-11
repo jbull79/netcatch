@@ -83,6 +83,10 @@ final class PeerLink {
     /// identity key, so the fingerprint authenticates the peer (no key-replay
     /// impersonation) and the ephemeral DH is bound to that identity (no MITM).
     func handshake(localName: String) async throws {
+        // Reap connections that open but stall before authenticating (slow-loris), then
+        // relax the timeout so legit transfers and accept-prompt waits aren't cut off.
+        stream.setReadTimeout(15)
+        defer { stream.setReadTimeout(0) }
         let identity = CryptoService.identitySigningKey()
         let ephemeral = Curve25519.KeyAgreement.PrivateKey()
         let ephemeralPub = ephemeral.publicKey.rawRepresentation
@@ -95,7 +99,9 @@ final class PeerLink {
                                  signature: signature)
         try await stream.sendFrame(try JSONEncoder().encode(outgoing))
 
-        let incomingData = try await stream.receiveFrame()
+        // The handshake is tiny; cap the (still-unauthenticated) frame well below the
+        // general limit so a hostile peer can't force a large pre-auth allocation.
+        let incomingData = try await stream.receiveFrame(maxBytes: 64 * 1024)
         let incoming = try JSONDecoder().decode(Handshake.self, from: incomingData)
 
         // Verify the peer holds the identity private key behind its fingerprint and

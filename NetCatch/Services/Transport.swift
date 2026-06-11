@@ -13,12 +13,19 @@ protocol ByteStream: AnyObject, Sendable {
     func sendBytes(_ data: Data) async throws
     /// Return between 1 and `max` bytes, or throw `LinkError.closed` at EOF.
     func receiveBytes(max: Int) async throws -> Data
+    /// Set a receive idle timeout in seconds (0 = block indefinitely). Used to reap
+    /// stalled pre-handshake connections; a no-op for event-driven transports.
+    func setReadTimeout(_ seconds: TimeInterval)
     /// Tear down the stream (also unblocks any in-flight receive).
     func close()
 }
 
 /// Largest single frame we will allocate for / accept (matches the old NWConnection cap).
-private let kMaxFrameSize = 16 * 1024 * 1024
+let kMaxFrameSize = 16 * 1024 * 1024
+
+/// Cap on a single recv allocation, so a large frame doesn't allocate its full size on
+/// every partial read. `receiveExact` loops, so correctness is unaffected.
+private let kMaxReadChunk = 256 * 1024
 
 extension ByteStream {
     /// Read exactly `count` bytes (looping over partial reads) or throw at EOF.
@@ -40,10 +47,12 @@ extension ByteStream {
         try await sendBytes(frame)
     }
 
-    func receiveFrame() async throws -> Data {
+    /// Read one length-prefixed frame, rejecting any prefix larger than `maxBytes`
+    /// (defends against a hostile length forcing a huge allocation).
+    func receiveFrame(maxBytes: Int = kMaxFrameSize) async throws -> Data {
         let header = try await receiveExact(4)
         let length = header.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }.bigEndian
-        guard length <= kMaxFrameSize else { throw LinkError.malformed }
+        guard length <= maxBytes else { throw LinkError.malformed }
         return try await receiveExact(Int(length))
     }
 }
@@ -76,6 +85,8 @@ final class NWByteStream: ByteStream, @unchecked Sendable {
         }
     }
 
+    func setReadTimeout(_ seconds: TimeInterval) { /* NW is event-driven; no thread to reap */ }
+
     func close() { connection.cancel() }
 }
 
@@ -90,14 +101,30 @@ final class POSIXByteStream: ByteStream, @unchecked Sendable {
     private let writeQueue = DispatchQueue(label: "netcatch.posix.write")
     private let closeLock = NSLock()
     private var isClosed = false
+    private var closeHook: (() -> Void)?
 
     init(fd: Int32) { self.fd = fd }
 
+    /// Run `hook` exactly once when the stream is closed (used to release a slot in the
+    /// inbound connection limiter).
+    func setOnClose(_ hook: @escaping () -> Void) {
+        closeLock.lock(); defer { closeLock.unlock() }
+        if isClosed { hook() } else { closeHook = hook }
+    }
+
+    private var closed: Bool { closeLock.lock(); defer { closeLock.unlock() }; return isClosed }
+
     func open() async throws { /* already connected/accepted */ }
+
+    func setReadTimeout(_ seconds: TimeInterval) {
+        var tv = timeval(tv_sec: Int(seconds), tv_usec: Int32((seconds - Double(Int(seconds))) * 1_000_000))
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+    }
 
     func sendBytes(_ data: Data) async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             writeQueue.async { [fd] in
+                guard !self.closed else { cont.resume(throwing: LinkError.closed); return }
                 let ok = data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Bool in
                     guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return true }
                     var sent = 0
@@ -116,8 +143,10 @@ final class POSIXByteStream: ByteStream, @unchecked Sendable {
     func receiveBytes(max: Int) async throws -> Data {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, Error>) in
             readQueue.async { [fd] in
-                var tmp = [UInt8](repeating: 0, count: max)
-                let n = tmp.withUnsafeMutableBytes { Darwin.recv(fd, $0.baseAddress, max, 0) }
+                guard !self.closed else { cont.resume(throwing: LinkError.closed); return }
+                let want = Swift.min(max, kMaxReadChunk)
+                var tmp = [UInt8](repeating: 0, count: want)
+                let n = tmp.withUnsafeMutableBytes { Darwin.recv(fd, $0.baseAddress, want, 0) }
                 if n > 0 { cont.resume(returning: Data(tmp[0..<n])) }
                 else { cont.resume(throwing: LinkError.closed) }
             }
@@ -125,11 +154,15 @@ final class POSIXByteStream: ByteStream, @unchecked Sendable {
     }
 
     func close() {
-        closeLock.lock(); defer { closeLock.unlock() }
-        guard !isClosed else { return }
+        let hook: (() -> Void)?
+        closeLock.lock()
+        if isClosed { closeLock.unlock(); return }
         isClosed = true
+        hook = closeHook; closeHook = nil
+        closeLock.unlock()
         shutdown(fd, SHUT_RDWR)   // unblock any in-flight recv
         Darwin.close(fd)
+        hook?()
     }
 
     // MARK: Connect / listen helpers
@@ -173,5 +206,28 @@ final class POSIXByteStream: ByteStream, @unchecked Sendable {
         }
         DebugLog.log("posix connect failed → \(host):\(port) errno=\(lastErrno)", .warn)
         throw LinkError.closed
+    }
+}
+
+/// Caps the number of concurrent inbound connections being handled, so a flood of
+/// unauthenticated connections can't exhaust threads / CPU. Sendable so the accept loop
+/// (background thread) and stream teardown can use it without actor hops.
+final class InboundLimiter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    private let maximum: Int
+    init(maximum: Int) { self.maximum = maximum }
+
+    /// Reserve a slot; returns false if at capacity (caller should drop the connection).
+    func tryAcquire() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard count < maximum else { return false }
+        count += 1
+        return true
+    }
+
+    func release() {
+        lock.lock(); defer { lock.unlock() }
+        if count > 0 { count -= 1 }
     }
 }

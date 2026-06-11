@@ -18,6 +18,8 @@ final class ReceiverServer: ObservableObject {
     private var listenFD: Int32 = -1
     private var acceptQueue = DispatchQueue(label: "netcatch.accept")
     private var advertiser: NetService?
+    /// Bound on concurrent inbound connections (anti-DoS); shared with the accept thread.
+    private let inbound = InboundLimiter(maximum: 24)
 
     // NWListener fallback
     private var nwListener: NWListener?
@@ -51,7 +53,13 @@ final class ReceiverServer: ObservableObject {
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         addr.sin_family = sa_family_t(AF_INET)
         addr.sin_port = port.bigEndian
-        addr.sin_addr.s_addr = INADDR_ANY
+        // Bind to the LAN interface address when known (limits exposure to the local
+        // network instead of every interface); fall back to INADDR_ANY otherwise.
+        if let ip = LocalNetwork.ipv4Address(), inet_pton(AF_INET, ip, &addr.sin_addr) == 1 {
+            DebugLog.log("listener: binding to LAN address \(ip)")
+        } else {
+            addr.sin_addr.s_addr = INADDR_ANY
+        }
         let bindOK = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
                 Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
@@ -76,11 +84,19 @@ final class ReceiverServer: ObservableObject {
         // main-actor state (e.g. listenFD) from this thread, or Swift's exclusivity
         // enforcement traps and the app crashes. The loop ends when stop() closes the
         // socket and accept() returns an error.
+        let limiter = inbound
         acceptQueue.async { [weak self] in
             while true {
                 let clientFD = accept(fd, nil, nil)
                 if clientFD < 0 { break }
+                // Drop new connections past the concurrency cap (anti-DoS).
+                guard limiter.tryAcquire() else {
+                    Darwin.close(clientFD)
+                    DebugLog.log("listener: inbound connection dropped (at capacity)", .warn)
+                    continue
+                }
                 let stream = POSIXByteStream(fd: clientFD)
+                stream.setOnClose { limiter.release() }   // free the slot when the link ends
                 Task { @MainActor in
                     guard let self else { stream.close(); return }
                     DebugLog.log("listener: incoming POSIX connection")
