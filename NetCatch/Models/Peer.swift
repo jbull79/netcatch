@@ -7,6 +7,8 @@ struct Peer: Identifiable, Hashable {
     let name: String
     let endpoint: NWEndpoint
     var isManual: Bool = false
+    /// Resolved "host:port" for display (Bonjour peers resolve asynchronously).
+    var address: String? = nil
 
     static func bonjour(endpoint: NWEndpoint) -> Peer {
         let name: String

@@ -129,7 +129,14 @@ struct SendView: View {
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: "desktopcomputer")
-                Text(peer.name)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(peer.name)
+                    if let address = peer.address {
+                        Text(address)
+                            .font(.system(.caption, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 Spacer()
                 Image(systemName: "paperplane.fill").foregroundStyle(.tint)
             }

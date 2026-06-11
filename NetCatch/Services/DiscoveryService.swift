@@ -8,6 +8,7 @@ final class DiscoveryService: ObservableObject {
 
     private var browser: NWBrowser?
     private let serviceType = "_netcatch._tcp"
+    private var addressCache: [String: String] = [:]   // peer.id -> "host:port"
 
     /// The local Bonjour service name to exclude from results (so we don't list ourselves).
     var ownServiceName: String = ""
@@ -23,12 +24,25 @@ final class DiscoveryService: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 let own = self.ownServiceName
-                let discovered: [Peer] = endpoints.compactMap { endpoint in
+                var discovered: [Peer] = endpoints.compactMap { endpoint in
                     guard case let .service(name, _, _, _) = endpoint else { return nil }
                     if name == own { return nil }
-                    return Peer.bonjour(endpoint: endpoint)
+                    var peer = Peer.bonjour(endpoint: endpoint)
+                    peer.address = self.addressCache[peer.id]   // show cached IP immediately
+                    return peer
                 }
-                self.peers = discovered.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+                discovered.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+                self.peers = discovered
+                // Resolve the IP for any peer we haven't resolved yet, then fill it in.
+                for peer in discovered where self.addressCache[peer.id] == nil {
+                    Task { @MainActor in
+                        guard let addr = await TransportConnector.shared.resolveAddress(of: peer) else { return }
+                        self.addressCache[peer.id] = addr
+                        if let idx = self.peers.firstIndex(where: { $0.id == peer.id }) {
+                            self.peers[idx].address = addr
+                        }
+                    }
+                }
             }
         }
 

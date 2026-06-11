@@ -72,6 +72,12 @@ final class TransportConnector {
     /// Forget a cached choice (e.g. after a network change) so probing restarts fresh.
     func resetCache() { winner.removeAll() }
 
+    /// Resolve a peer's endpoint to a display "host:port" string (Bonjour → IP).
+    func resolveAddress(of peer: Peer) async -> String? {
+        guard let r = await resolveHostPort(peer.endpoint) else { return nil }
+        return "\(r.host):\(r.port)"
+    }
+
     // MARK: - One strategy attempt (connect + handshake)
 
     private func attempt(_ strategy: TransportStrategy, peer: Peer,
