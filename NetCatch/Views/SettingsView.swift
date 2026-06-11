@@ -6,6 +6,7 @@ struct SettingsView: View {
     @EnvironmentObject private var manager: TransferManager
     @EnvironmentObject private var trust: TrustStore
 
+    @StateObject private var readiness = ControlReadiness()
     @State private var portText = ""
     @State private var localIP: String?
 
@@ -13,8 +14,9 @@ struct SettingsView: View {
         TabView {
             general.tabItem { Label("General", systemImage: "gear") }
             devices.tabItem { Label("Devices", systemImage: "checkmark.shield") }
+            control.tabItem { Label("Control", systemImage: "keyboard") }
         }
-        .frame(width: 460, height: 360)
+        .frame(width: 460, height: 420)
         .onAppear {
             portText = String(settings.port)
             localIP = LocalNetwork.ipv4Address()
@@ -99,6 +101,66 @@ struct SettingsView: View {
             }
         }
         .padding()
+    }
+
+    // MARK: Control (KVM) readiness — the MDM feasibility test
+
+    private var control: some View {
+        Form {
+            Section {
+                HStack(spacing: 8) {
+                    pip(readiness.allReady)
+                    Text(readiness.allReady ? "Ready — this Mac can run Control"
+                                            : "Not ready — Control can't run here yet")
+                        .fontWeight(.medium)
+                    Spacer()
+                    Button("Re-check") { readiness.refresh() }
+                }
+            } header: {
+                Text("Keyboard / mouse control readiness")
+            } footer: {
+                Text("Experimental. Run this on each Mac (especially the work laptop). If a toggle is greyed out in System Settings and stays red after Grant, it's blocked by your organization (MDM) — Control can't work there.")
+            }
+
+            Section("Permissions") {
+                readinessRow("Accessibility", ok: readiness.accessibility,
+                             hint: "Inject + consume input") { readiness.requestAccessibility() }
+                readinessRow("Input Monitoring", ok: readiness.inputMonitoring,
+                             hint: "Capture keyboard & mouse") { readiness.requestInputMonitoring() }
+                readinessRow("Live event tap", ok: readiness.eventTapCreatable,
+                             hint: "Can actually create a tap now", grant: nil)
+            }
+
+            if readiness.sandboxed {
+                Section {
+                    Label("This build is sandboxed; a shipping Control feature would need a non-sandboxed build. A red result here may be the sandbox, not MDM.",
+                          systemImage: "info.circle")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear { readiness.refresh() }
+    }
+
+    @ViewBuilder
+    private func readinessRow(_ title: String, ok: Bool, hint: String,
+                             grant: (() -> Void)? = { }) -> some View {
+        HStack(spacing: 10) {
+            pip(ok)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                Text(hint).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            if !ok, let grant { Button("Grant…", action: grant) }
+        }
+    }
+
+    private func pip(_ ok: Bool) -> some View {
+        Circle().fill(ok ? Color.green : Color.red)
+            .frame(width: 11, height: 11)
+            .overlay(Circle().strokeBorder(.black.opacity(0.15)))
     }
 
     private func chooseFolder() {
