@@ -128,7 +128,8 @@ final class TransferManager: ObservableObject {
             // socket first — routes like netcat through a VPN — then Network.framework
             // variants), validated through the handshake and cached per peer.
             try Task.checkCancellation()
-            let link = try await TransportConnector.shared.connect(to: peer, localName: settings.deviceName)
+            let link = try await TransportConnector.shared.connect(to: peer, localName: settings.deviceName,
+                                                                   allowed: settings.enabledTransportStrategies)
             activeLinks[transfer.id] = link
             transfer.peerName = link.remoteName == "Unknown" ? peer.name : link.remoteName
             transfer.peerFingerprint = link.remoteFingerprint

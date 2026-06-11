@@ -15,6 +15,14 @@ enum TransportStrategy: String, CaseIterable {
         case .nwDefault: return "Apple (default)"
         }
     }
+
+    var detail: String {
+        switch self {
+        case .posix: return "Raw BSD socket with kernel routing — works through a VPN like nc."
+        case .nwProhibitOther: return "Apple Network.framework, excluding virtual/VPN interfaces."
+        case .nwDefault: return "Apple Network.framework with default path selection."
+        }
+    }
 }
 
 /// Establishes an outbound `PeerLink` by trying each transport strategy until one
@@ -28,13 +36,16 @@ final class TransportConnector {
     private var winner: [String: TransportStrategy] = [:]
     private let connectTimeout: TimeInterval = 6
 
-    /// Connect + handshake to `peer`, returning a ready, authenticated link.
-    func connect(to peer: Peer, localName: String) async throws -> PeerLink {
+    /// Connect + handshake to `peer`, returning a ready, authenticated link. `allowed`
+    /// restricts which transport methods may be tried (user-toggleable for testing).
+    func connect(to peer: Peer, localName: String,
+                 allowed: Set<TransportStrategy> = Set(TransportStrategy.allCases)) async throws -> PeerLink {
         let resolved = await resolveHostPort(peer.endpoint)
         let key = resolved.map { "\($0.host):\($0.port)" } ?? peer.id
 
-        var order = TransportStrategy.allCases
-        if let preferred = winner[key] {       // try last-known-good first
+        var order = TransportStrategy.allCases.filter { allowed.contains($0) }
+        if order.isEmpty { order = TransportStrategy.allCases }   // safety: never nothing to try
+        if let preferred = winner[key], order.contains(preferred) {   // try last-known-good first
             order.removeAll { $0 == preferred }
             order.insert(preferred, at: 0)
         }

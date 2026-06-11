@@ -54,6 +54,23 @@ struct SettingsView: View {
             Section("Sending") {
                 Toggle("Compress by default", isOn: $settings.compressByDefault)
             }
+            Section {
+                ForEach(TransportStrategy.allCases, id: \.self) { strategy in
+                    Toggle(isOn: Binding(
+                        get: { settings.isTransportEnabled(strategy) },
+                        set: { settings.setTransport(strategy, enabled: $0) }
+                    )) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(strategy.label)
+                            Text(strategy.detail).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            } header: {
+                Text("Connection methods")
+            } footer: {
+                Text("All on by default. Each send tries the enabled methods in order and remembers the one that worked. Turn some off to test a specific method.")
+            }
         }
         .formStyle(.grouped)
     }

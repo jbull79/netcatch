@@ -9,6 +9,12 @@ final class AppSettings: ObservableObject {
     @Published var port: UInt16 { didSet { defaults.set(Int(port), forKey: Keys.port) } }
     @Published var autoAcceptTrusted: Bool { didSet { defaults.set(autoAcceptTrusted, forKey: Keys.autoAccept) } }
     @Published var compressByDefault: Bool { didSet { defaults.set(compressByDefault, forKey: Keys.compress) } }
+    /// Which transport methods the connector may use, by raw value. All enabled by
+    /// default; can be turned off individually for testing. Shared by every connection
+    /// (file transfer today, workbook sync later), so it's protocol-agnostic.
+    @Published var enabledTransports: Set<String> {
+        didSet { defaults.set(Array(enabledTransports), forKey: Keys.transports) }
+    }
     @Published private(set) var saveDirectoryBookmark: Data?
 
     private let defaults = UserDefaults.standard
@@ -19,6 +25,7 @@ final class AppSettings: ObservableObject {
         static let autoAccept = "netcatch.autoAcceptTrusted"
         static let compress = "netcatch.compressByDefault"
         static let saveBookmark = "netcatch.saveBookmark"
+        static let transports = "netcatch.enabledTransports"
     }
 
     init() {
@@ -27,7 +34,26 @@ final class AppSettings: ObservableObject {
         port = storedPort == 0 ? 51234 : UInt16(storedPort)
         autoAcceptTrusted = defaults.bool(forKey: Keys.autoAccept)
         compressByDefault = defaults.object(forKey: Keys.compress) as? Bool ?? true
+        if let stored = defaults.array(forKey: Keys.transports) as? [String], !stored.isEmpty {
+            enabledTransports = Set(stored)
+        } else {
+            enabledTransports = Set(TransportStrategy.allCases.map(\.rawValue))
+        }
         saveDirectoryBookmark = defaults.data(forKey: Keys.saveBookmark)
+    }
+
+    /// Enabled strategies as a typed set; never empty (falls back to all) so the app
+    /// can't be left unable to connect.
+    var enabledTransportStrategies: Set<TransportStrategy> {
+        let set = Set(enabledTransports.compactMap(TransportStrategy.init(rawValue:)))
+        return set.isEmpty ? Set(TransportStrategy.allCases) : set
+    }
+
+    func isTransportEnabled(_ s: TransportStrategy) -> Bool { enabledTransports.contains(s.rawValue) }
+
+    func setTransport(_ s: TransportStrategy, enabled: Bool) {
+        if enabled { enabledTransports.insert(s.rawValue) }
+        else if enabledTransports.count > 1 { enabledTransports.remove(s.rawValue) }  // keep at least one
     }
 
     /// Resolved default save directory (Downloads if no custom folder chosen).
