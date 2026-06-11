@@ -44,6 +44,7 @@ final class TransferManager: ObservableObject {
     let receiver = ReceiverServer()
     let discovery = DiscoveryService()
     let trust = TrustStore()
+    let readiness = ControlReadiness()
 
     private let chunkSize = 256 * 1024
 
@@ -135,6 +136,35 @@ final class TransferManager: ObservableObject {
         tasks[transfer.id]?.cancel()
     }
 
+    // MARK: Status exchange (readiness over the authenticated link)
+
+    /// Open a status session to `peer` and return its readiness report (or nil on failure).
+    func queryStatus(of peer: Peer) async -> StatusReport? {
+        do {
+            let link = try await TransportConnector.shared.connect(to: peer, localName: settings.deviceName,
+                                                                   allowed: settings.enabledTransportStrategies)
+            defer { link.cancel() }
+            try await link.sendSecureObject(SessionHello(kind: .status))
+            return try await link.receiveSecureObject(StatusReport.self)
+        } catch {
+            DebugLog.log("status: query to '\(peer.name)' failed — \(error.localizedDescription)", .warn)
+            return nil
+        }
+    }
+
+    /// This device's readiness, for replying to a status query or showing locally.
+    func localStatusReport() -> StatusReport {
+        readiness.refresh()
+        let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+        return StatusReport(deviceName: settings.deviceName,
+                            appVersion: version,
+                            control: readiness.allReady,
+                            controlAccessibility: readiness.accessibility,
+                            controlInputMonitoring: readiness.inputMonitoring,
+                            controlEventTap: readiness.eventTapCreatable,
+                            workbook: false)   // workbook sync not built yet
+    }
+
     private func runSend(transfer: Transfer, urls: [URL], peer: Peer, compress: Bool) async {
         defer {
             tasks[transfer.id] = nil
@@ -169,6 +199,7 @@ final class TransferManager: ObservableObject {
             transfer.peerFingerprint = link.remoteFingerprint
             DebugLog.log("send: connected + handshake ok, peer=\(link.remoteName) fp=\(link.remoteFingerprint)")
 
+            try await link.sendSecureObject(SessionHello(kind: .transfer))
             try await link.sendSecureObject(header)
             DebugLog.log("send: header sent (\(header.items.count) item(s), \(header.totalTransmitted) bytes) — awaiting accept")
             let decision = try await link.receiveSecureObject(TransferDecision.self)
@@ -234,13 +265,33 @@ final class TransferManager: ObservableObject {
     // MARK: Receiving
 
     private func handleIncoming(_ link: PeerLink) {
-        let transfer = Transfer(direction: .receive, peerName: "Incoming…", items: [], totalBytes: 0)
-        activeLinks[transfer.id] = link
-        let task = Task { [weak self] in
-            guard let self else { return }
-            await self.runReceive(transfer: transfer, link: link)
+        // Handshake, then branch on the session kind the initiator selected.
+        Task { @MainActor [weak self] in
+            guard let self else { link.cancel(); return }
+            do {
+                try await link.start()
+                try await link.handshake(localName: self.settings.deviceName)
+                let hello = try await link.receiveSecureObject(SessionHello.self)
+                DebugLog.log("incoming: \(hello.kind.rawValue) session from \(link.remoteName) fp=\(link.remoteFingerprint)")
+                switch hello.kind {
+                case .status:
+                    // Reply with our readiness over the same authenticated link; no prompt.
+                    try await link.sendSecureObject(self.localStatusReport())
+                    link.cancel()
+                case .transfer:
+                    let transfer = Transfer(direction: .receive, peerName: link.remoteName, items: [], totalBytes: 0)
+                    self.activeLinks[transfer.id] = link
+                    let task = Task { [weak self] in
+                        guard let self else { return }
+                        await self.runReceive(transfer: transfer, link: link)
+                    }
+                    self.tasks[transfer.id] = task
+                }
+            } catch {
+                DebugLog.log("incoming: failed before session start — \(error.localizedDescription)", .warn)
+                link.cancel()
+            }
         }
-        tasks[transfer.id] = task
     }
 
     private func runReceive(transfer: Transfer, link: PeerLink) async {
@@ -249,9 +300,6 @@ final class TransferManager: ObservableObject {
             activeLinks[transfer.id] = nil
         }
         do {
-            try await link.start()
-            try await link.handshake(localName: settings.deviceName)
-            DebugLog.log("receive: handshake ok from \(link.remoteName) fp=\(link.remoteFingerprint)")
             let header = try await link.receiveSecureObject(TransferHeader.self)
             DebugLog.log("receive: header (\(header.items.count) item(s), \(header.totalTransmitted) bytes) from \(header.senderName)")
             // Reject a malformed sha256 before it is ever used as a partial-file name
