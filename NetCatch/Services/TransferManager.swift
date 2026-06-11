@@ -52,6 +52,13 @@ final class TransferManager: ObservableObject {
     private var tasks: [UUID: Task<Void, Never>] = [:]
     private var activeLinks: [UUID: PeerLink] = [:]
 
+    /// Watches for the LAN address changing (DHCP renew, Wi-Fi switch) so the listener,
+    /// which binds to a specific LAN IP, can be rebound instead of going stale.
+    private let pathMonitor = NWPathMonitor()
+    private var pathMonitorStarted = false
+    private var lastBoundIP: String?
+    private var rebindTask: Task<Void, Never>?
+
     init(settings: AppSettings, history: HistoryStore) {
         self.settings = settings
         self.history = history
@@ -64,8 +71,10 @@ final class TransferManager: ObservableObject {
         DebugLog.log("services: starting as '\(settings.deviceName)', listen port \(settings.port)")
         discovery.ownServiceName = settings.deviceName
         receiver.start(serviceName: settings.deviceName, port: settings.port)
+        lastBoundIP = LocalNetwork.ipv4Address()
         discovery.start()
         NotificationService.requestAuthorization()
+        startPathMonitorIfNeeded()
     }
 
     func restartServices() {
@@ -73,6 +82,31 @@ final class TransferManager: ObservableObject {
         discovery.stop()
         TransportConnector.shared.resetCache()   // network may have changed; re-probe transports
         startServices()
+    }
+
+    /// Begin watching for network-path changes (started once, lives for the app session).
+    private func startPathMonitorIfNeeded() {
+        guard !pathMonitorStarted else { return }
+        pathMonitorStarted = true
+        pathMonitor.pathUpdateHandler = { [weak self] _ in
+            Task { @MainActor in self?.handlePathChange() }
+        }
+        pathMonitor.start(queue: .global(qos: .utility))
+    }
+
+    /// On a network change, rebind the listener if our LAN address actually changed.
+    /// Debounced, because the new address may not have settled when the path event fires.
+    private func handlePathChange() {
+        guard LocalNetwork.ipv4Address() != lastBoundIP else { return }
+        rebindTask?.cancel()
+        rebindTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            guard let self, !Task.isCancelled else { return }
+            let settled = LocalNetwork.ipv4Address()
+            guard settled != self.lastBoundIP else { return }
+            DebugLog.log("network: LAN address changed (\(self.lastBoundIP ?? "none") → \(settled ?? "none")) — rebinding listener", .warn)
+            self.restartServices()
+        }
     }
 
     // MARK: Sending
