@@ -9,6 +9,9 @@ final class AppSettings: ObservableObject {
     @Published var port: UInt16 { didSet { defaults.set(Int(port), forKey: Keys.port) } }
     @Published var autoAcceptTrusted: Bool { didSet { defaults.set(autoAcceptTrusted, forKey: Keys.autoAccept) } }
     @Published var compressByDefault: Bool { didSet { defaults.set(compressByDefault, forKey: Keys.compress) } }
+    /// Experimental keyboard/mouse control (KVM). Off by default; gates both accepting
+    /// inbound control and offering to control a peer.
+    @Published var controlEnabled: Bool { didSet { defaults.set(controlEnabled, forKey: Keys.control) } }
     /// Which transport methods the connector may use, by raw value. All enabled by
     /// default; can be turned off individually for testing. Shared by every connection
     /// (file transfer today, workbook sync later), so it's protocol-agnostic.
@@ -26,6 +29,7 @@ final class AppSettings: ObservableObject {
         static let compress = "netcatch.compressByDefault"
         static let saveBookmark = "netcatch.saveBookmark"
         static let transports = "netcatch.enabledTransports"
+        static let control = "netcatch.controlEnabled"
     }
 
     init() {
@@ -34,6 +38,7 @@ final class AppSettings: ObservableObject {
         port = storedPort == 0 ? 51234 : UInt16(storedPort)
         autoAcceptTrusted = defaults.bool(forKey: Keys.autoAccept)
         compressByDefault = defaults.object(forKey: Keys.compress) as? Bool ?? true
+        controlEnabled = defaults.bool(forKey: Keys.control)
         if let stored = defaults.array(forKey: Keys.transports) as? [String], !stored.isEmpty {
             enabledTransports = Set(stored)
         } else {

@@ -136,6 +136,30 @@ final class TransferManager: ObservableObject {
         tasks[transfer.id]?.cancel()
     }
 
+    // MARK: Control (KVM) — receive injected input on the controlled Mac
+
+    @Published var controlActiveFrom: String?   // peer name currently controlling us, if any
+
+    private func runControlReceive(link: PeerLink) async {
+        let injector = ControlInjector()
+        controlActiveFrom = link.remoteName
+        DebugLog.log("control: session started from \(link.remoteName)")
+        defer {
+            injector.releaseAll()
+            controlActiveFrom = nil
+            link.cancel()
+            DebugLog.log("control: session ended (\(link.remoteName))")
+        }
+        do {
+            while true {
+                let event = try await link.receiveSecureObject(ControlEvent.self)
+                injector.apply(event)
+            }
+        } catch {
+            DebugLog.log("control: session closed — \(error.localizedDescription)", .warn)
+        }
+    }
+
     // MARK: Status exchange (readiness over the authenticated link)
 
     /// Open a status session to `peer` and return its readiness report (or nil on failure).
@@ -278,6 +302,12 @@ final class TransferManager: ObservableObject {
                     // Reply with our readiness over the same authenticated link; no prompt.
                     try await link.sendSecureObject(self.localStatusReport())
                     link.cancel()
+                case .control:
+                    guard self.settings.controlEnabled else {
+                        DebugLog.log("incoming: control session refused (control disabled)", .warn)
+                        link.cancel(); return
+                    }
+                    await self.runControlReceive(link: link)
                 case .transfer:
                     let transfer = Transfer(direction: .receive, peerName: link.remoteName, items: [], totalBytes: 0)
                     self.activeLinks[transfer.id] = link
