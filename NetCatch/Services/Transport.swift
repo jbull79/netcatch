@@ -103,7 +103,14 @@ final class POSIXByteStream: ByteStream, @unchecked Sendable {
     private var isClosed = false
     private var closeHook: (() -> Void)?
 
-    init(fd: Int32) { self.fd = fd }
+    init(fd: Int32) {
+        self.fd = fd
+        // Disable Nagle: input/control events are tiny and latency-sensitive; without
+        // this they're batched and delivered in bursts, making the remote pointer rough.
+        // (No-op / harmless on non-TCP sockets like the test socketpair.)
+        var on: Int32 = 1
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, socklen_t(MemoryLayout<Int32>.size))
+    }
 
     /// Run `hook` exactly once when the stream is closed (used to release a slot in the
     /// inbound connection limiter).

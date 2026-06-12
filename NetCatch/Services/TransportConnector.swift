@@ -90,9 +90,12 @@ final class TransportConnector {
         case .nwProhibitOther:
             let params = NWParameters.tcp
             params.prohibitedInterfaceTypes = [.other]
+            (params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options)?.noDelay = true
             stream = NWByteStream(NWConnection(to: peer.endpoint, using: params))
         case .nwDefault:
-            stream = NWByteStream(NWConnection(to: peer.endpoint, using: .tcp))
+            let params = NWParameters.tcp
+            (params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options)?.noDelay = true
+            stream = NWByteStream(NWConnection(to: peer.endpoint, using: params))
         }
         let link = PeerLink(stream: stream)
         do {
