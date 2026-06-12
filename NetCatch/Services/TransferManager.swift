@@ -147,6 +147,8 @@ final class TransferManager: ObservableObject {
         // Run the decode+inject loop off the main actor so it doesn't fight the UI.
         await Task.detached(priority: .userInitiated) {
             let injector = ControlInjector()
+            injector.start()
+            defer { injector.stop() }
             var moves = 0, others = 0
             var last = Date(), maxGap = 0.0, maxApply = 0.0, window = Date()
             do {

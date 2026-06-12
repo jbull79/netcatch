@@ -1,12 +1,13 @@
 import Foundation
 import CoreGraphics
 
-/// Injects forwarded input events on the *controlled* (home) Mac via CGEvent.post.
-/// Requires Accessibility (grantable on the home Mac, no admin). Keeps a virtual cursor
-/// clamped to the main display and tracks held keys so they can be released on
-/// disconnect (no stuck modifiers).
-/// Runs off the main actor (CGEvent.post is thread-safe) so injecting ~120 events/sec
-/// doesn't contend with the home Mac's UI. Accessed by a single receive loop, serially.
+/// Injects forwarded input on the *controlled* (home) Mac via CGEvent.post. Requires
+/// Accessibility (grantable, no admin). Runs off the main actor.
+///
+/// Mouse moves are *paced*: incoming deltas accumulate in a buffer and are drained on a
+/// steady local 120 Hz timer, so bursty network delivery (events arriving clumped with
+/// 200–500 ms gaps) is smoothed into even pointer motion instead of stutter. Clicks/keys
+/// flush the buffer first so they land at the right position.
 final class ControlInjector: @unchecked Sendable {
     private let bounds: CGRect
     private var cursor: CGPoint
@@ -15,21 +16,41 @@ final class ControlInjector: @unchecked Sendable {
     private var mouseDown = false
     private let source = CGEventSource(stateID: .hidSystemState)
 
+    // Pacing
+    private let lock = NSLock()
+    private var pendDX = 0.0, pendDY = 0.0
+    private var timer: DispatchSourceTimer?
+    private let drainFactor = 0.5      // fraction of remaining buffer applied per tick
+
     init() {
         bounds = CGDisplayBounds(CGMainDisplayID())
         cursor = CGPoint(x: bounds.midX, y: bounds.midY)
     }
 
+    func start() {
+        let t = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "netcatch.inject", qos: .userInteractive))
+        t.schedule(deadline: .now(), repeating: .milliseconds(8), leeway: .nanoseconds(0))
+        t.setEventHandler { [weak self] in self?.drain() }
+        t.resume()
+        timer = t
+    }
+
+    func stop() {
+        timer?.cancel(); timer = nil
+        flushPendingMove()
+        releaseAll()
+    }
+
     func apply(_ e: ControlEvent) {
         switch e.kind {
         case .mouseMove:
-            cursor.x = min(max(bounds.minX, cursor.x + e.dx), bounds.maxX - 1)
-            cursor.y = min(max(bounds.minY, cursor.y + e.dy), bounds.maxY - 1)
-            postMouse(mouseDown ? .leftMouseDragged : .mouseMoved, button: .left)
+            lock.lock(); pendDX += e.dx; pendDY += e.dy; lock.unlock()
         case .mouseDown:
+            flushPendingMove()
             if e.button == 0 { mouseDown = true }
             postMouse(downType(e.button), button: cgButton(e.button))
         case .mouseUp:
+            flushPendingMove()
             if e.button == 0 { mouseDown = false }
             postMouse(upType(e.button), button: cgButton(e.button))
         case .scroll:
@@ -49,17 +70,47 @@ final class ControlInjector: @unchecked Sendable {
         case .releaseAll:
             releaseAll()
         case .hostStats:
-            break   // diagnostics only — handled before injection
+            break
         }
     }
 
-    /// Release everything held — call on disconnect / focus loss.
     func releaseAll() {
         for key in heldKeys { postKey(key, down: false) }
         heldKeys.removeAll()
         if mouseDown { postMouse(.leftMouseUp, button: .left); mouseDown = false }
         flags = []
     }
+
+    // MARK: Paced mouse motion
+
+    /// Drain a fraction of the buffered movement (called on the local timer) → smooth.
+    private func drain() {
+        lock.lock()
+        guard pendDX != 0 || pendDY != 0 else { lock.unlock(); return }
+        let stepX: Double, stepY: Double
+        if abs(pendDX) < 2 && abs(pendDY) < 2 {       // finish off the remainder
+            stepX = pendDX; stepY = pendDY
+        } else {
+            stepX = pendDX * drainFactor; stepY = pendDY * drainFactor
+        }
+        pendDX -= stepX; pendDY -= stepY
+        lock.unlock()
+        moveBy(stepX, stepY)
+    }
+
+    /// Apply all buffered movement immediately (before a click/key, or at stop).
+    private func flushPendingMove() {
+        lock.lock(); let dx = pendDX, dy = pendDY; pendDX = 0; pendDY = 0; lock.unlock()
+        if dx != 0 || dy != 0 { moveBy(dx, dy) }
+    }
+
+    private func moveBy(_ dx: Double, _ dy: Double) {
+        cursor.x = min(max(bounds.minX, cursor.x + dx), bounds.maxX - 1)
+        cursor.y = min(max(bounds.minY, cursor.y + dy), bounds.maxY - 1)
+        postMouse(mouseDown ? .leftMouseDragged : .mouseMoved, button: .left)
+    }
+
+    // MARK: CGEvent helpers
 
     private func postMouse(_ type: CGEventType, button: CGMouseButton) {
         let event = CGEvent(mouseEventSource: source, mouseType: type,
