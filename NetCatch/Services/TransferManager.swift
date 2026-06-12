@@ -152,6 +152,10 @@ final class TransferManager: ObservableObject {
             do {
                 while true {
                     let event = try await link.receiveSecureObject(ControlEvent.self)
+                    if event.kind == .hostStats {
+                        DebugLog.log("control host(remote): \(Int(event.dx)) moves/s sent, \(Int(event.dy)) ticks/s")
+                        continue
+                    }
                     let now = Date()
                     let gap = now.timeIntervalSince(last) * 1000; last = now
                     let t0 = Date(); injector.apply(event)

@@ -48,6 +48,8 @@ final class ControlInjector: @unchecked Sendable {
             flags = CGEventFlags(rawValue: e.flags)
         case .releaseAll:
             releaseAll()
+        case .hostStats:
+            break   // diagnostics only — handled before injection
         }
     }
 

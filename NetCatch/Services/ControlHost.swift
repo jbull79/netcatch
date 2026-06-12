@@ -128,6 +128,7 @@ final class ControlHost: ObservableObject {
             let now = DispatchTime.now()
             if now.uptimeNanoseconds - window.uptimeNanoseconds >= 1_000_000_000 {
                 DebugLog.log("control host: \(sent) moves/s sent (\(ticks) timer ticks/s)")
+                cont?.yield(ControlEvent(kind: .hostStats, dx: Double(sent), dy: Double(ticks)))
                 sent = 0; ticks = 0; window = now
             }
         }

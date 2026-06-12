@@ -12,6 +12,7 @@ enum ControlEventKind: String, Codable {
     case keyUp
     case flagsChanged
     case releaseAll   // disconnect / focus loss — client releases everything held
+    case hostStats    // host→client diagnostics (dx=moves/s sent, dy=timer ticks/s); not injected
 }
 
 /// Controlled Mac's reply to a control request: whether it will accept input.
