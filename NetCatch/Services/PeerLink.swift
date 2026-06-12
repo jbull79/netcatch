@@ -62,8 +62,9 @@ extension NWConnection {
 }
 
 /// An encrypted, framed peer connection over any `ByteStream`. After `handshake()` all
-/// frames are AES-GCM sealed with the negotiated session key.
-final class PeerLink {
+/// frames are AES-GCM sealed with the negotiated session key. Sendable so the control
+/// receive loop can run off the main actor (sessionKey/names are set once at handshake).
+final class PeerLink: @unchecked Sendable {
     let stream: ByteStream
     private(set) var sessionKey: SymmetricKey?
     private(set) var remoteName: String = "Unknown"

@@ -117,9 +117,18 @@ final class ControlHost: ObservableObject {
         let buf = moveBuffer
         let timer = DispatchSource.makeTimerSource(queue: flushQueue)
         timer.schedule(deadline: .now(), repeating: .milliseconds(8), leeway: .nanoseconds(0))
+        var sent = 0, ticks = 0
+        var window = DispatchTime.now()
         timer.setEventHandler {
+            ticks += 1
             if let m = buf.take() {
                 cont?.yield(ControlEvent(kind: .mouseMove, dx: m.dx, dy: m.dy, flags: m.flags))
+                sent += 1
+            }
+            let now = DispatchTime.now()
+            if now.uptimeNanoseconds - window.uptimeNanoseconds >= 1_000_000_000 {
+                DebugLog.log("control host: \(sent) moves/s sent (\(ticks) timer ticks/s)")
+                sent = 0; ticks = 0; window = now
             }
         }
         timer.resume()

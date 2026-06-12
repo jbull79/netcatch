@@ -141,23 +141,35 @@ final class TransferManager: ObservableObject {
     @Published var controlActiveFrom: String?   // peer name currently controlling us, if any
 
     private func runControlReceive(link: PeerLink) async {
-        let injector = ControlInjector()
-        controlActiveFrom = link.remoteName
-        DebugLog.log("control: session started from \(link.remoteName)")
-        defer {
-            injector.releaseAll()
-            controlActiveFrom = nil
-            link.cancel()
-            DebugLog.log("control: session ended (\(link.remoteName))")
-        }
-        do {
-            while true {
-                let event = try await link.receiveSecureObject(ControlEvent.self)
-                injector.apply(event)
+        let name = link.remoteName
+        controlActiveFrom = name
+        DebugLog.log("control: session started from \(name)")
+        // Run the decode+inject loop off the main actor so it doesn't fight the UI.
+        await Task.detached(priority: .userInitiated) {
+            let injector = ControlInjector()
+            var moves = 0, others = 0
+            var last = Date(), maxGap = 0.0, maxApply = 0.0, window = Date()
+            do {
+                while true {
+                    let event = try await link.receiveSecureObject(ControlEvent.self)
+                    let now = Date()
+                    let gap = now.timeIntervalSince(last) * 1000; last = now
+                    let t0 = Date(); injector.apply(event)
+                    maxApply = max(maxApply, Date().timeIntervalSince(t0) * 1000)
+                    if event.kind == .mouseMove { moves += 1; maxGap = max(maxGap, gap) } else { others += 1 }
+                    if now.timeIntervalSince(window) >= 1.0 {
+                        DebugLog.log("control recv: \(moves) moves/s (+\(others) other), arrival gap max \(String(format: "%.1f", maxGap))ms, inject max \(String(format: "%.2f", maxApply))ms")
+                        moves = 0; others = 0; maxGap = 0; maxApply = 0; window = now
+                    }
+                }
+            } catch {
+                injector.releaseAll()
+                DebugLog.log("control: session closed — \(error.localizedDescription)", .warn)
             }
-        } catch {
-            DebugLog.log("control: session closed — \(error.localizedDescription)", .warn)
-        }
+        }.value
+        controlActiveFrom = nil
+        link.cancel()
+        DebugLog.log("control: session ended (\(name))")
     }
 
     // MARK: Status exchange (readiness over the authenticated link)

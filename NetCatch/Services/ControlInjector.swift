@@ -5,8 +5,9 @@ import CoreGraphics
 /// Requires Accessibility (grantable on the home Mac, no admin). Keeps a virtual cursor
 /// clamped to the main display and tracks held keys so they can be released on
 /// disconnect (no stuck modifiers).
-@MainActor
-final class ControlInjector {
+/// Runs off the main actor (CGEvent.post is thread-safe) so injecting ~120 events/sec
+/// doesn't contend with the home Mac's UI. Accessed by a single receive loop, serially.
+final class ControlInjector: @unchecked Sendable {
     private let bounds: CGRect
     private var cursor: CGPoint
     private var flags: CGEventFlags = []
