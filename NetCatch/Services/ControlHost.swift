@@ -19,12 +19,12 @@ final class ControlHost: ObservableObject {
     private var continuation: AsyncStream<ControlEvent>.Continuation?
     private var sendTask: Task<Void, Never>?
 
-    // Mouse-move coalescing — accumulate deltas, flush at a fixed rate so a fast mouse
-    // doesn't flood the link (which makes the pointer jerky).
-    private var pendingDX = 0.0
-    private var pendingDY = 0.0
-    private var lastFlags: UInt64 = 0
-    private var flushTimer: Task<Void, Never>?
+    // Mouse-move coalescing — accumulate deltas in a lock-guarded buffer, flushed on a
+    // precise off-main timer so the cursor stream has a steady cadence (no Task.sleep /
+    // main-actor jitter, which caused stutter).
+    private let moveBuffer = MoveBuffer()
+    private let flushQueue = DispatchQueue(label: "netcatch.control.flush", qos: .userInteractive)
+    private var flushTimer: DispatchSourceTimer?
 
     init() {
         NotificationCenter.default.addObserver(
@@ -113,18 +113,23 @@ final class ControlHost: ObservableObject {
 
     private func startFlushTimer() {
         flushTimer?.cancel()
-        flushTimer = Task { @MainActor [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 8_000_000)   // ~120 Hz
-                self?.flushMove()
+        let cont = continuation          // captured (Sendable) — no self access on the timer queue
+        let buf = moveBuffer
+        let timer = DispatchSource.makeTimerSource(queue: flushQueue)
+        timer.schedule(deadline: .now(), repeating: .milliseconds(8), leeway: .nanoseconds(0))
+        timer.setEventHandler {
+            if let m = buf.take() {
+                cont?.yield(ControlEvent(kind: .mouseMove, dx: m.dx, dy: m.dy, flags: m.flags))
             }
         }
+        timer.resume()
+        flushTimer = timer
     }
 
+    /// Flush any pending move on the main actor (before a click/key, or at capture end).
     private func flushMove() {
-        guard pendingDX != 0 || pendingDY != 0 else { return }
-        send(ControlEvent(kind: .mouseMove, dx: pendingDX, dy: pendingDY, flags: lastFlags))
-        pendingDX = 0; pendingDY = 0
+        guard let m = moveBuffer.take() else { return }
+        send(ControlEvent(kind: .mouseMove, dx: m.dx, dy: m.dy, flags: m.flags))
     }
 
     private func installMonitor() {
@@ -145,10 +150,8 @@ final class ControlHost: ObservableObject {
                 }
             }
             guard let ce = self.translate(event) else { return nil }
-            self.lastFlags = ce.flags
             if ce.kind == .mouseMove {
-                self.pendingDX += ce.dx                 // coalesce; flushed on the timer
-                self.pendingDY += ce.dy
+                self.moveBuffer.add(dx: ce.dx, dy: ce.dy, flags: ce.flags)   // coalesced, flushed by timer
             } else {
                 self.flushMove()                        // keep clicks/keys positioned correctly
                 self.send(ce)
@@ -173,6 +176,21 @@ final class ControlHost: ObservableObject {
         case .keyUp:          return ControlEvent(kind: .keyUp, keyCode: Int(e.keyCode), flags: flags)
         case .flagsChanged:   return ControlEvent(kind: .flagsChanged, flags: flags)
         default: return nil
+        }
+    }
+
+    // Thread-safe accumulator for coalesced mouse deltas (written on main, drained by the
+    // flush timer on its own queue).
+    final class MoveBuffer: @unchecked Sendable {
+        private let lock = NSLock()
+        private var dx = 0.0, dy = 0.0, flags: UInt64 = 0, dirty = false
+        func add(dx: Double, dy: Double, flags: UInt64) {
+            lock.lock(); self.dx += dx; self.dy += dy; self.flags = flags; dirty = true; lock.unlock()
+        }
+        func take() -> (dx: Double, dy: Double, flags: UInt64)? {
+            lock.lock(); defer { lock.unlock() }
+            guard dirty else { return nil }
+            let r = (dx, dy, flags); dx = 0; dy = 0; dirty = false; return r
         }
     }
 
