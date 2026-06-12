@@ -6,9 +6,9 @@ struct ActivityView: View {
     var body: some View {
         Group {
             if manager.transfers.isEmpty {
-                ContentUnavailableView("No transfers yet",
-                                       systemImage: "arrow.up.arrow.down.circle",
-                                       description: Text("Sends and receives will appear here."))
+                EmptyPlaceholder(title: "No transfers yet",
+                                 systemImage: "arrow.up.arrow.down.circle",
+                                 message: "Sends and receives will appear here.")
             } else {
                 ScrollView {
                     LazyVStack(spacing: 12) {

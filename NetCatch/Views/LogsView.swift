@@ -10,10 +10,9 @@ struct LogsView: View {
             toolbar
             Divider()
             if log.entries.isEmpty {
-                ContentUnavailableView("No logs yet",
-                                       systemImage: "doc.text.magnifyingglass",
-                                       description: Text("Connection and transfer activity will appear here. Try a transfer, then Copy the log."))
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                EmptyPlaceholder(title: "No logs yet",
+                                 systemImage: "doc.text.magnifyingglass",
+                                 message: "Connection and transfer activity will appear here. Try a transfer, then Copy the log.")
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -25,7 +24,7 @@ struct LogsView: View {
                         .padding(12)
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .onChange(of: log.entries.count) {
+                    .onChange(of: log.entries.count) { _ in
                         if let last = log.entries.last { proxy.scrollTo(last.id, anchor: .bottom) }
                     }
                 }

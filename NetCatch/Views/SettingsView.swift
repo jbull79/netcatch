@@ -80,9 +80,9 @@ struct SettingsView: View {
     private var devices: some View {
         VStack(alignment: .leading) {
             if trust.known.isEmpty {
-                ContentUnavailableView("No known devices",
-                                       systemImage: "shield",
-                                       description: Text("Devices you accept transfers from appear here."))
+                EmptyPlaceholder(title: "No known devices",
+                                 systemImage: "shield",
+                                 message: "Devices you accept transfers from appear here.")
             } else {
                 List {
                     ForEach(trust.known.sorted(by: { $0.value < $1.value }), id: \.key) { fingerprint, name in

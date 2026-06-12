@@ -6,9 +6,9 @@ struct HistoryView: View {
     var body: some View {
         Group {
             if history.records.isEmpty {
-                ContentUnavailableView("No history",
-                                       systemImage: "clock",
-                                       description: Text("Completed transfers will be listed here."))
+                EmptyPlaceholder(title: "No history",
+                                 systemImage: "clock",
+                                 message: "Completed transfers will be listed here.")
             } else {
                 List {
                     ForEach(history.records) { record in
