@@ -127,8 +127,16 @@ struct SettingsView: View {
                              hint: "Inject + consume input") { readiness.requestAccessibility() }
                 readinessRow("Input Monitoring", ok: readiness.inputMonitoring,
                              hint: "Capture keyboard & mouse") { readiness.requestInputMonitoring() }
-                readinessRow("Live event tap", ok: readiness.eventTapCreatable,
-                             hint: "Can actually create a tap now", grant: nil)
+                HStack(spacing: 10) {
+                    pip(readiness.eventTapCreatable)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Live event tap")
+                        Text("Run manually — this probe can crash a locked-down (MDM) Mac.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Test") { readiness.probeEventTap() }
+                }
             }
 
             if readiness.sandboxed {

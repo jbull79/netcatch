@@ -27,11 +27,19 @@ final class ControlReadiness: ObservableObject {
 
     init() { refresh() }
 
+    /// Safe permission reads only (no event tap). Used on automatic / network-triggered
+    /// paths — creating a live tap on a locked-down (MDM) Mac can get the process killed,
+    /// so that probe is explicit-only (see `probeEventTap`).
     func refresh() {
         accessibility = AXIsProcessTrusted()
         inputMonitoring = CGPreflightListenEventAccess()
-        eventTapCreatable = canCreateTap()
         sandboxed = NSHomeDirectory().contains("/Library/Containers/")
+    }
+
+    /// Actually attempt to create an event tap. Only call from an explicit user action,
+    /// never automatically.
+    func probeEventTap() {
+        eventTapCreatable = canCreateTap()
     }
 
     /// Prompt for Accessibility and open the relevant Privacy pane.
