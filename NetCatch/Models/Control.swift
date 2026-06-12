@@ -14,6 +14,12 @@ enum ControlEventKind: String, Codable {
     case releaseAll   // disconnect / focus loss — client releases everything held
 }
 
+/// Controlled Mac's reply to a control request: whether it will accept input.
+struct ControlAck: Codable {
+    var accepted: Bool
+    var reason: String = ""
+}
+
 struct ControlEvent: Codable {
     var kind: ControlEventKind
     var dx: Double = 0

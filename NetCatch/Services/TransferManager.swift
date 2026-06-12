@@ -303,7 +303,11 @@ final class TransferManager: ObservableObject {
                     try await link.sendSecureObject(self.localStatusReport())
                     link.cancel()
                 case .control:
-                    guard self.settings.controlEnabled else {
+                    let accepted = self.settings.controlEnabled
+                    try await link.sendSecureObject(ControlAck(
+                        accepted: accepted,
+                        reason: accepted ? "" : "Control is turned off on \(self.settings.deviceName)"))
+                    guard accepted else {
                         DebugLog.log("incoming: control session refused (control disabled)", .warn)
                         link.cancel(); return
                     }

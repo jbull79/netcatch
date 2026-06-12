@@ -36,6 +36,15 @@ final class ControlHost: ObservableObject {
             do {
                 let link = try await TransportConnector.shared.connect(to: peer, localName: localName)
                 try await link.sendSecureObject(SessionHello(kind: .control))
+                // Wait for the peer to accept before we ever capture / hijack the cursor.
+                let ack = try await link.receiveSecureObject(ControlAck.self)
+                guard ack.accepted else {
+                    link.cancel()
+                    self.lastError = ack.reason.isEmpty ? "\(peer.name) is not accepting control." : ack.reason
+                    self.state = .idle
+                    DebugLog.log("control host: peer refused — \(self.lastError ?? "")", .warn)
+                    return
+                }
                 self.link = link
                 self.startSendLoop()
                 self.state = .connected
@@ -75,7 +84,7 @@ final class ControlHost: ObservableObject {
     // MARK: Capture
 
     func beginCapture() {
-        guard state == .connected else { return }
+        guard state == .connected, link != nil else { return }   // never hijack without a live session
         installMonitor()
         CGDisplayHideCursor(CGMainDisplayID())
         CGAssociateMouseAndMouseCursorPosition(0)   // decouple hardware mouse from cursor
@@ -85,10 +94,10 @@ final class ControlHost: ObservableObject {
 
     func endCapture() {
         guard state == .capturing else { return }
-        CGAssociateMouseAndMouseCursorPosition(1)
+        state = .connected                          // set first — prevents reentrancy
+        CGAssociateMouseAndMouseCursorPosition(1)   // always restore the cursor
         CGDisplayShowCursor(CGMainDisplayID())
         send(ControlEvent(kind: .releaseAll))
-        state = .connected
         DebugLog.log("control host: capture end")
     }
 
