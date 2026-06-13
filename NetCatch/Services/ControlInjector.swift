@@ -20,7 +20,10 @@ final class ControlInjector: @unchecked Sendable {
     private let lock = NSLock()
     private var pendDX = 0.0, pendDY = 0.0
     private var timer: DispatchSourceTimer?
-    private let drainFactor = 0.5      // fraction of remaining buffer applied per tick
+    // Fraction of the remaining buffered movement applied per 120 Hz tick. Lower = motion
+    // is spread across more ticks → fills the ~100 ms Wi-Fi delivery gaps with continuous
+    // glide instead of a quick burst then freeze. Trades a little latency for smoothness.
+    private let drainFactor = 0.25
 
     init() {
         bounds = CGDisplayBounds(CGMainDisplayID())
