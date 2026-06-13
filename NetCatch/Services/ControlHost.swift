@@ -50,6 +50,7 @@ final class ControlHost: ObservableObject {
                     DebugLog.log("control host: peer refused — \(self.lastError ?? "")", .warn)
                     return
                 }
+                link.setLowLatency()        // ask Wi-Fi not to batch our input frames
                 self.link = link
                 self.state = .connected
                 DebugLog.log("control host: connected to \(peer.name)")

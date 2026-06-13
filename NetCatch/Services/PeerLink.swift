@@ -79,6 +79,9 @@ final class PeerLink: @unchecked Sendable {
 
     func cancel() { stream.close() }
 
+    /// Request low-latency treatment for this link (control sessions only).
+    func setLowLatency() { (stream as? POSIXByteStream)?.setLowLatency() }
+
     /// Exchange signed ephemeral + identity keys, verify the peer's signature, and
     /// derive the session key. Each side signs its ephemeral key with its long-term
     /// identity key, so the fingerprint authenticates the peer (no key-replay

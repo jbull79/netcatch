@@ -112,6 +112,14 @@ final class POSIXByteStream: ByteStream, @unchecked Sendable {
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &on, socklen_t(MemoryLayout<Int32>.size))
     }
 
+    /// Mark this socket latency-critical (voice service class) so Wi-Fi power-save
+    /// coalescing doesn't batch small control frames into 100s-of-ms bursts. Applied only
+    /// to control links (not bulk transfers).
+    func setLowLatency() {
+        var svc = Int32(NET_SERVICE_TYPE_VO)
+        setsockopt(fd, SOL_SOCKET, SO_NET_SERVICE_TYPE, &svc, socklen_t(MemoryLayout<Int32>.size))
+    }
+
     /// Run `hook` exactly once when the stream is closed (used to release a slot in the
     /// inbound connection limiter).
     func setOnClose(_ hook: @escaping () -> Void) {

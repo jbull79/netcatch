@@ -329,6 +329,7 @@ final class TransferManager: ObservableObject {
                         DebugLog.log("incoming: control session refused (control disabled)", .warn)
                         link.cancel(); return
                     }
+                    link.setLowLatency()        // match the host: keep Wi-Fi from batching input
                     await self.runControlReceive(link: link)
                 case .transfer:
                     let transfer = Transfer(direction: .receive, peerName: link.remoteName, items: [], totalBytes: 0)
