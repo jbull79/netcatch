@@ -11,6 +11,7 @@ struct ContentView: View {
     enum Section: String, CaseIterable, Identifiable {
         case send = "Send"
         case activity = "Activity"
+        case workbook = "Workbook"
         case services = "Services"
         case control = "Control"
         case history = "History"
@@ -20,6 +21,7 @@ struct ContentView: View {
             switch self {
             case .send: return "paperplane.fill"
             case .activity: return "arrow.up.arrow.down.circle.fill"
+            case .workbook: return "book"
             case .services: return "point.3.connected.trianglepath.dotted"
             case .control: return "keyboard"
             case .history: return "clock.fill"
@@ -53,6 +55,7 @@ struct ContentView: View {
         switch selection {
         case .send: SendView()
         case .activity: ActivityView()
+        case .workbook: WorkbookView()
         case .services: ServicesView()
         case .control: ControlView()
         case .history: HistoryView()

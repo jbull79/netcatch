@@ -45,6 +45,7 @@ final class TransferManager: ObservableObject {
     let discovery = DiscoveryService()
     let trust = TrustStore()
     let readiness = ControlReadiness()
+    let workbook = WorkbookStore()
 
     private let chunkSize = 256 * 1024
 
@@ -182,6 +183,47 @@ final class TransferManager: ObservableObject {
         DebugLog.log("control: session ended (\(name))")
     }
 
+    // MARK: Workbook sync
+
+    /// Sync with one peer (initiator role): exchange manifests, push what they lack, pull
+    /// what we lack, merge. No accept prompt — rides the authenticated link.
+    func syncWith(_ peer: Peer) async {
+        do {
+            let link = try await TransportConnector.shared.connect(to: peer, localName: settings.deviceName,
+                                                                   allowed: settings.enabledTransportStrategies)
+            defer { link.cancel() }
+            try await link.sendSecureObject(SessionHello(kind: .sync))
+            try await link.sendSecureObject(workbook.manifest())
+            let theirs = try await link.receiveSecureObject(WorkbookManifest.self)
+            try await link.sendSecureObject(WorkbookBatch(entries: workbook.entriesNewer(than: theirs)))
+            let incoming = try await link.receiveSecureObject(WorkbookBatch.self)
+            workbook.merge(incoming.entries)
+            DebugLog.log("sync: with \(peer.name) — pulled \(incoming.entries.count)")
+        } catch {
+            DebugLog.log("sync: with \(peer.name) failed — \(error.localizedDescription)", .warn)
+        }
+    }
+
+    /// Sync with every discovered peer.
+    func syncAllPeers() async {
+        for peer in discovery.peers { await syncWith(peer) }
+    }
+
+    /// Responder role for an inbound `.sync` session.
+    private func runSyncReceive(link: PeerLink) async {
+        defer { link.cancel() }
+        do {
+            let theirs = try await link.receiveSecureObject(WorkbookManifest.self)
+            try await link.sendSecureObject(workbook.manifest())
+            let incoming = try await link.receiveSecureObject(WorkbookBatch.self)
+            try await link.sendSecureObject(WorkbookBatch(entries: workbook.entriesNewer(than: theirs)))
+            workbook.merge(incoming.entries)
+            DebugLog.log("sync: served \(link.remoteName) — merged \(incoming.entries.count)")
+        } catch {
+            DebugLog.log("sync: serve failed — \(error.localizedDescription)", .warn)
+        }
+    }
+
     // MARK: Status exchange (readiness over the authenticated link)
 
     /// Open a status session to `peer` and return its readiness report (or nil on failure).
@@ -208,7 +250,7 @@ final class TransferManager: ObservableObject {
                             controlAccessibility: readiness.accessibility,
                             controlInputMonitoring: readiness.inputMonitoring,
                             controlEventTap: readiness.eventTapCreatable,
-                            workbook: false)   // workbook sync not built yet
+                            workbook: true)    // workbook sync available
     }
 
     private func runSend(transfer: Transfer, urls: [URL], peer: Peer, compress: Bool) async {
@@ -335,6 +377,8 @@ final class TransferManager: ObservableObject {
                     }
                     link.setLowLatency()        // match the host: keep Wi-Fi from batching input
                     await self.runControlReceive(link: link)
+                case .sync:
+                    await self.runSyncReceive(link: link)
                 case .transfer:
                     let transfer = Transfer(direction: .receive, peerName: link.remoteName, items: [], totalBytes: 0)
                     self.activeLinks[transfer.id] = link

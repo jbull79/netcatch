@@ -7,6 +7,7 @@ enum SessionKind: String, Codable {
     case transfer
     case status
     case control   // keyboard/mouse (KVM) input stream
+    case sync      // workbook sync
 }
 
 /// Sent by the initiator immediately after the handshake to select the session kind.

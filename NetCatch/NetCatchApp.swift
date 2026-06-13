@@ -113,6 +113,7 @@ struct NetCatchApp: App {
                 .environmentObject(model.manager.discovery)
                 .environmentObject(model.manager.receiver)
                 .environmentObject(model.manager.trust)
+                .environmentObject(model.manager.workbook)
                 .frame(minWidth: 760, minHeight: 520)
                 .onAppear { model.start() }
         }
