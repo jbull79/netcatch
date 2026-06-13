@@ -16,6 +16,11 @@ final class ControlHost: ObservableObject {
 
     private var link: PeerLink?
     private var monitor: Any?
+    private let linkBox = LinkBox()        // lets off-main capture threads send
+    private var edge: EdgeCapture?
+    /// Set by the UI before connecting. Edge mode uses a global tap (needs Accessibility
+    /// + Input Monitoring); window mode (click-to-capture) needs no permissions.
+    var edgeModeEnabled = false
 
     // Mouse-move coalescing — accumulate deltas in a lock-guarded buffer, flushed on a
     // precise off-main timer so the cursor stream has a steady cadence (no Task.sleep /
@@ -27,7 +32,8 @@ final class ControlHost: ObservableObject {
     init() {
         NotificationCenter.default.addObserver(
             forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.endCapture() }   // lost focus → stop, no stuck keys
+            // Window mode needs focus; edge mode uses a global tap, so don't drop it.
+            Task { @MainActor in if self?.edgeModeEnabled == false { self?.endCapture() } }
         }
     }
 
@@ -52,7 +58,9 @@ final class ControlHost: ObservableObject {
                 }
                 link.setLowLatency()        // ask Wi-Fi not to batch our input frames
                 self.link = link
+                self.linkBox.link = link
                 self.state = .connected
+                if self.edgeModeEnabled { self.startEdgeMode() }
                 DebugLog.log("control host: connected to \(peer.name)")
             } catch {
                 self.lastError = error.localizedDescription
@@ -64,7 +72,9 @@ final class ControlHost: ObservableObject {
 
     func disconnect() {
         endCapture()
+        edge?.stop(); edge = nil
         link?.cancel(); link = nil
+        linkBox.link = nil
         state = .idle; peerName = nil
     }
 
@@ -72,9 +82,9 @@ final class ControlHost: ObservableObject {
     /// pending mouse move first so it stays correctly positioned. Synchronous write — no
     /// async send-task that would batch frames and clump them on the wire.
     private func sendOnQueue(_ event: ControlEvent) {
-        guard let link = link else { return }
-        let buf = moveBuffer
+        let buf = moveBuffer; let box = linkBox
         flushQueue.async { [weak self] in
+            guard let link = box.link else { return }
             if let m = buf.take() {
                 _ = link.sendSecureObjectSync(ControlEvent(kind: .mouseMove, dx: m.dx, dy: m.dy, flags: m.flags))
             }
@@ -84,11 +94,49 @@ final class ControlHost: ObservableObject {
         }
     }
 
+    /// Start edge-bump capture (global tap). Forwarding feeds the same buffer + sync send
+    /// path as window mode.
+    private func startEdgeMode() {
+        let buf = moveBuffer; let box = linkBox; let q = flushQueue
+        let edge = EdgeCapture(
+            forwardMove: { dx, dy, flags in buf.add(dx: dx, dy: dy, flags: flags) },
+            forwardDiscrete: { ce in
+                q.async {
+                    guard let link = box.link else { return }
+                    if let m = buf.take() {
+                        _ = link.sendSecureObjectSync(ControlEvent(kind: .mouseMove, dx: m.dx, dy: m.dy, flags: m.flags))
+                    }
+                    _ = link.sendSecureObjectSync(ce)
+                }
+            },
+            onBegin: { [weak self] in Task { @MainActor in self?.enterCapture() } },
+            onEnd:   { [weak self] in Task { @MainActor in self?.endCapture() } }
+        )
+        if edge.start() {
+            self.edge = edge
+            DebugLog.log("control host: edge mode active — bump the right screen edge to control")
+        } else {
+            self.lastError = "Edge mode needs Accessibility + Input Monitoring (grant them in Settings → Control)."
+            DebugLog.log("control host: edge tap failed (permissions?)", .error)
+        }
+    }
+
     // MARK: Capture
 
+    /// Window mode: user clicked the capture area.
     func beginCapture() {
         guard state == .connected, link != nil else { return }   // never hijack without a live session
         installMonitor()
+        enterCapture()
+    }
+
+    func endCapture() {
+        guard state == .capturing else { return }
+        leaveCapture(warpInsideEdge: edgeModeEnabled)
+    }
+
+    private func enterCapture() {
+        guard state == .connected else { return }
         CGDisplayHideCursor(CGMainDisplayID())
         CGAssociateMouseAndMouseCursorPosition(0)   // decouple hardware mouse from cursor
         state = .capturing
@@ -96,25 +144,28 @@ final class ControlHost: ObservableObject {
         DebugLog.log("control host: capture begin")
     }
 
-    func endCapture() {
-        guard state == .capturing else { return }
+    private func leaveCapture(warpInsideEdge: Bool) {
         state = .connected                          // set first — prevents reentrancy
         flushTimer?.cancel(); flushTimer = nil
         CGAssociateMouseAndMouseCursorPosition(1)   // always restore the cursor
         CGDisplayShowCursor(CGMainDisplayID())
+        if warpInsideEdge {                         // move off the edge so it won't re-trigger
+            let b = CGDisplayBounds(CGMainDisplayID())
+            CGWarpMouseCursorPosition(CGPoint(x: b.maxX - 60, y: b.midY))
+        }
         sendOnQueue(ControlEvent(kind: .releaseAll))   // flushes pending move + releaseAll
         DebugLog.log("control host: capture end")
     }
 
     private func startFlushTimer() {
         flushTimer?.cancel()
-        guard let link = link else { return }       // captured (Sendable) — used on the timer queue
-        let buf = moveBuffer
+        let buf = moveBuffer; let box = linkBox
         let timer = DispatchSource.makeTimerSource(queue: flushQueue)
         timer.schedule(deadline: .now(), repeating: .milliseconds(8), leeway: .nanoseconds(0))
         var sent = 0, ticks = 0
         var window = DispatchTime.now()
         timer.setEventHandler { [weak self] in
+            guard let link = box.link else { return }
             ticks += 1
             if let m = buf.take() {
                 if link.sendSecureObjectSync(ControlEvent(kind: .mouseMove, dx: m.dx, dy: m.dy, flags: m.flags)) {
@@ -192,6 +243,17 @@ final class ControlHost: ObservableObject {
             lock.lock(); defer { lock.unlock() }
             guard dirty else { return nil }
             let r = (dx, dy, flags); dx = 0; dy = 0; dirty = false; return r
+        }
+    }
+
+    /// Holds the active link so off-main capture/timer threads can send without a
+    /// main-actor hop.
+    final class LinkBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var _link: PeerLink?
+        var link: PeerLink? {
+            get { lock.lock(); defer { lock.unlock() }; return _link }
+            set { lock.lock(); _link = newValue; lock.unlock() }
         }
     }
 

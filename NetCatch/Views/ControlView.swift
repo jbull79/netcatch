@@ -6,8 +6,10 @@ struct ControlView: View {
     @EnvironmentObject private var settings: AppSettings
     @EnvironmentObject private var discovery: DiscoveryService
     @StateObject private var host = ControlHost()
+    @StateObject private var readiness = ControlReadiness()
 
     @State private var selectedPeerID: String?
+    @State private var useEdgeMode = false
 
     var body: some View {
         ScrollView {
@@ -22,6 +24,7 @@ struct ControlView: View {
             .padding(22)
         }
         .navigationTitle("Control")
+        .onAppear { readiness.refresh() }
         .onDisappear { host.disconnect() }
     }
 
@@ -59,8 +62,20 @@ struct ControlView: View {
     @ViewBuilder private var connectionArea: some View {
         switch host.state {
         case .idle:
+            let edgeOK = readiness.accessibility && readiness.inputMonitoring
+            Toggle(isOn: $useEdgeMode) {
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Edge mode — bump the screen edge")
+                    Text(edgeOK ? "Move the cursor off the right edge to take control; no clicking. ⌃⌥⌘ releases."
+                                : "Needs Accessibility + Input Monitoring — grant them in Settings → Control.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(.switch)
+            .disabled(!edgeOK)
             Button("Connect") {
                 if let peer = discovery.peers.first(where: { $0.id == selectedPeerID }) {
+                    host.edgeModeEnabled = useEdgeMode && edgeOK
                     host.connect(to: peer, localName: settings.deviceName)
                 }
             }
@@ -79,15 +94,20 @@ struct ControlView: View {
 
     private var captureArea: some View {
         let capturing = host.state == .capturing
+        let edge = host.edgeModeEnabled
+        let name = host.peerName ?? ""
+        let title = capturing ? "Controlling \(name)"
+                  : (edge ? "Edge mode armed — bump the right edge to control \(name)"
+                          : "Click here to control \(name)")
+        let hint = capturing ? "Press ⌃⌥⌘ (control-option-command) to release."
+                 : (edge ? "Move your cursor off the right edge of this screen. Watch the other Mac."
+                         : "Your keyboard & mouse will drive the other Mac. Watch its screen.")
         return VStack(spacing: 12) {
             Image(systemName: capturing ? "keyboard.fill" : "keyboard")
                 .font(.system(size: 40))
                 .foregroundStyle(capturing ? Color.accentColor : .secondary)
-            Text(capturing ? "Controlling \(host.peerName ?? "")"
-                           : "Click here to control \(host.peerName ?? "")")
-                .font(.headline)
-            Text(capturing ? "Press ⌃⌥⌘ (control-option-command) to release."
-                           : "Your keyboard & mouse will drive the other Mac. Watch its screen.")
+            Text(title).font(.headline).multilineTextAlignment(.center)
+            Text(hint)
                 .font(.caption).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }
@@ -99,6 +119,6 @@ struct ControlView: View {
             .strokeBorder(capturing ? Color.accentColor : Color.secondary.opacity(0.3),
                           style: StrokeStyle(lineWidth: 2, dash: capturing ? [] : [8])))
         .contentShape(Rectangle())
-        .onTapGesture { if !capturing { host.beginCapture() } }
+        .onTapGesture { if !capturing && !edge { host.beginCapture() } }   // edge mode auto-captures
     }
 }
