@@ -147,6 +147,24 @@ final class POSIXByteStream: ByteStream, @unchecked Sendable {
         }
     }
 
+    /// Synchronous framed write on the calling thread — used by the latency-sensitive
+    /// control path to avoid the async send-task scheduling that batches input frames.
+    func sendFrameSync(_ data: Data) -> Bool {
+        if closed { return false }
+        var length = UInt32(data.count).bigEndian
+        var frame = Data(bytes: &length, count: 4); frame.append(data)
+        return frame.withUnsafeBytes { (raw: UnsafeRawBufferPointer) -> Bool in
+            guard let base = raw.bindMemory(to: UInt8.self).baseAddress else { return true }
+            var sent = 0
+            while sent < frame.count {
+                let n = Darwin.send(fd, base + sent, frame.count - sent, 0)
+                if n <= 0 { return false }
+                sent += n
+            }
+            return true
+        }
+    }
+
     func receiveBytes(max: Int) async throws -> Data {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Data, Error>) in
             readQueue.async { [fd] in

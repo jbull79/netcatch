@@ -135,6 +135,15 @@ final class PeerLink: @unchecked Sendable {
         try await sendSecure(try JSONEncoder().encode(value))
     }
 
+    /// Synchronous encrypted send (POSIX transport only) for the low-latency control
+    /// path. Returns false if not possible (e.g. NW transport) so the caller can fall back.
+    func sendSecureObjectSync<T: Encodable>(_ value: T) -> Bool {
+        guard let key = sessionKey, let posix = stream as? POSIXByteStream,
+              let data = try? JSONEncoder().encode(value),
+              let sealed = try? CryptoService.seal(data, key: key) else { return false }
+        return posix.sendFrameSync(sealed)
+    }
+
     func receiveSecureObject<T: Decodable>(_ type: T.Type) async throws -> T {
         try JSONDecoder().decode(type, from: try await receiveSecure())
     }

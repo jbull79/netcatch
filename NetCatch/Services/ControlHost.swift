@@ -16,8 +16,6 @@ final class ControlHost: ObservableObject {
 
     private var link: PeerLink?
     private var monitor: Any?
-    private var continuation: AsyncStream<ControlEvent>.Continuation?
-    private var sendTask: Task<Void, Never>?
 
     // Mouse-move coalescing — accumulate deltas in a lock-guarded buffer, flushed on a
     // precise off-main timer so the cursor stream has a steady cadence (no Task.sleep /
@@ -53,7 +51,6 @@ final class ControlHost: ObservableObject {
                     return
                 }
                 self.link = link
-                self.startSendLoop()
                 self.state = .connected
                 DebugLog.log("control host: connected to \(peer.name)")
             } catch {
@@ -66,27 +63,25 @@ final class ControlHost: ObservableObject {
 
     func disconnect() {
         endCapture()
-        continuation?.finish(); continuation = nil
-        sendTask?.cancel(); sendTask = nil
         link?.cancel(); link = nil
         state = .idle; peerName = nil
     }
 
-    private func startSendLoop() {
-        let stream = AsyncStream<ControlEvent> { self.continuation = $0 }
-        sendTask = Task { [weak self] in
-            for await event in stream {
-                guard let link = await self?.link else { break }
-                do { try await link.sendSecureObject(event) }
-                catch {
-                    await MainActor.run { self?.disconnect() }
-                    break
-                }
+    /// Send a discrete event (click/key/releaseAll) on the flush queue, flushing any
+    /// pending mouse move first so it stays correctly positioned. Synchronous write — no
+    /// async send-task that would batch frames and clump them on the wire.
+    private func sendOnQueue(_ event: ControlEvent) {
+        guard let link = link else { return }
+        let buf = moveBuffer
+        flushQueue.async { [weak self] in
+            if let m = buf.take() {
+                _ = link.sendSecureObjectSync(ControlEvent(kind: .mouseMove, dx: m.dx, dy: m.dy, flags: m.flags))
+            }
+            if !link.sendSecureObjectSync(event) {
+                Task { @MainActor in self?.disconnect() }
             }
         }
     }
-
-    private func send(_ event: ControlEvent) { continuation?.yield(event) }
 
     // MARK: Capture
 
@@ -104,42 +99,38 @@ final class ControlHost: ObservableObject {
         guard state == .capturing else { return }
         state = .connected                          // set first — prevents reentrancy
         flushTimer?.cancel(); flushTimer = nil
-        flushMove()
         CGAssociateMouseAndMouseCursorPosition(1)   // always restore the cursor
         CGDisplayShowCursor(CGMainDisplayID())
-        send(ControlEvent(kind: .releaseAll))
+        sendOnQueue(ControlEvent(kind: .releaseAll))   // flushes pending move + releaseAll
         DebugLog.log("control host: capture end")
     }
 
     private func startFlushTimer() {
         flushTimer?.cancel()
-        let cont = continuation          // captured (Sendable) — no self access on the timer queue
+        guard let link = link else { return }       // captured (Sendable) — used on the timer queue
         let buf = moveBuffer
         let timer = DispatchSource.makeTimerSource(queue: flushQueue)
         timer.schedule(deadline: .now(), repeating: .milliseconds(8), leeway: .nanoseconds(0))
         var sent = 0, ticks = 0
         var window = DispatchTime.now()
-        timer.setEventHandler {
+        timer.setEventHandler { [weak self] in
             ticks += 1
             if let m = buf.take() {
-                cont?.yield(ControlEvent(kind: .mouseMove, dx: m.dx, dy: m.dy, flags: m.flags))
-                sent += 1
+                if link.sendSecureObjectSync(ControlEvent(kind: .mouseMove, dx: m.dx, dy: m.dy, flags: m.flags)) {
+                    sent += 1
+                } else {
+                    Task { @MainActor in self?.disconnect() }
+                }
             }
             let now = DispatchTime.now()
             if now.uptimeNanoseconds - window.uptimeNanoseconds >= 1_000_000_000 {
                 DebugLog.log("control host: \(sent) moves/s sent (\(ticks) timer ticks/s)")
-                cont?.yield(ControlEvent(kind: .hostStats, dx: Double(sent), dy: Double(ticks)))
+                _ = link.sendSecureObjectSync(ControlEvent(kind: .hostStats, dx: Double(sent), dy: Double(ticks)))
                 sent = 0; ticks = 0; window = now
             }
         }
         timer.resume()
         flushTimer = timer
-    }
-
-    /// Flush any pending move on the main actor (before a click/key, or at capture end).
-    private func flushMove() {
-        guard let m = moveBuffer.take() else { return }
-        send(ControlEvent(kind: .mouseMove, dx: m.dx, dy: m.dy, flags: m.flags))
     }
 
     private func installMonitor() {
@@ -163,8 +154,7 @@ final class ControlHost: ObservableObject {
             if ce.kind == .mouseMove {
                 self.moveBuffer.add(dx: ce.dx, dy: ce.dy, flags: ce.flags)   // coalesced, flushed by timer
             } else {
-                self.flushMove()                        // keep clicks/keys positioned correctly
-                self.send(ce)
+                self.sendOnQueue(ce)                    // flushes pending move, keeps clicks positioned
             }
             return nil   // consume so the work Mac doesn't also act on it
         }
