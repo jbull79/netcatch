@@ -73,9 +73,17 @@ struct ControlView: View {
             }
             .toggleStyle(.switch)
             .disabled(!edgeOK)
+            if useEdgeMode && edgeOK {
+                Picker("Hand off at edge", selection: $settings.controlEdge) {
+                    ForEach(ScreenEdge.allCases) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .help("Which edge of this screen passes control to the other Mac. The other Mac's opposite edge hands control back.")
+            }
             Button("Connect") {
                 if let peer = discovery.peers.first(where: { $0.id == selectedPeerID }) {
                     host.edgeModeEnabled = useEdgeMode && edgeOK
+                    host.controlEdge = settings.controlEdge
                     host.connect(to: peer, localName: settings.deviceName)
                 }
             }

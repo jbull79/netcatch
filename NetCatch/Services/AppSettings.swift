@@ -12,6 +12,8 @@ final class AppSettings: ObservableObject {
     /// Experimental keyboard/mouse control (KVM). Off by default; gates both accepting
     /// inbound control and offering to control a peer.
     @Published var controlEnabled: Bool { didSet { defaults.set(controlEnabled, forKey: Keys.control) } }
+    /// Which screen edge hands off control to the other Mac (edge mode).
+    @Published var controlEdge: ScreenEdge { didSet { defaults.set(controlEdge.rawValue, forKey: Keys.controlEdge) } }
     /// Which transport methods the connector may use, by raw value. All enabled by
     /// default; can be turned off individually for testing. Shared by every connection
     /// (file transfer today, workbook sync later), so it's protocol-agnostic.
@@ -30,6 +32,7 @@ final class AppSettings: ObservableObject {
         static let saveBookmark = "netcatch.saveBookmark"
         static let transports = "netcatch.enabledTransports"
         static let control = "netcatch.controlEnabled"
+        static let controlEdge = "netcatch.controlEdge"
     }
 
     init() {
@@ -39,6 +42,7 @@ final class AppSettings: ObservableObject {
         autoAcceptTrusted = defaults.bool(forKey: Keys.autoAccept)
         compressByDefault = defaults.object(forKey: Keys.compress) as? Bool ?? true
         controlEnabled = defaults.bool(forKey: Keys.control)
+        controlEdge = ScreenEdge(rawValue: defaults.string(forKey: Keys.controlEdge) ?? "") ?? .right
         if let stored = defaults.array(forKey: Keys.transports) as? [String], !stored.isEmpty {
             enabledTransports = Set(stored)
         } else {

@@ -15,19 +15,31 @@ final class EdgeCapture: @unchecked Sendable {
     private let lock = NSLock()
     private var capturing = false
 
+    private let edge: ScreenEdge
     private let forwardMove: @Sendable (Double, Double, UInt64) -> Void
     private let forwardDiscrete: @Sendable (ControlEvent) -> Void
     private let onBegin: @Sendable () -> Void
     private let onEnd: @Sendable () -> Void
 
-    init(forwardMove: @escaping @Sendable (Double, Double, UInt64) -> Void,
+    init(edge: ScreenEdge,
+         forwardMove: @escaping @Sendable (Double, Double, UInt64) -> Void,
          forwardDiscrete: @escaping @Sendable (ControlEvent) -> Void,
          onBegin: @escaping @Sendable () -> Void,
          onEnd: @escaping @Sendable () -> Void) {
+        self.edge = edge
         self.forwardMove = forwardMove
         self.forwardDiscrete = forwardDiscrete
         self.onBegin = onBegin
         self.onEnd = onEnd
+    }
+
+    private func atEdge(_ p: CGPoint) -> Bool {
+        switch edge {
+        case .right:  return p.x >= bounds.maxX - 2
+        case .left:   return p.x <= bounds.minX + 1
+        case .top:    return p.y <= bounds.minY + 1
+        case .bottom: return p.y >= bounds.maxY - 2
+        }
     }
 
     /// Create + start the tap on its own run-loop thread. Returns false if the tap can't
@@ -76,7 +88,7 @@ final class EdgeCapture: @unchecked Sendable {
             return Unmanaged.passUnretained(event)
         }
         if !isCapturing {
-            if event.location.x >= bounds.maxX - 2 {     // hit right edge → take control
+            if atEdge(event.location) {                   // hit the hand-off edge → take control
                 setCapturing(true)
                 onBegin()
                 return nil

@@ -152,6 +152,10 @@ final class TransferManager: ObservableObject {
             var moves = 0, others = 0
             var last = Date(), maxGap = 0.0, maxApply = 0.0, window = Date()
             do {
+                // Host tells us which of our edges means "give control back".
+                let setup = try await link.receiveSecureObject(ControlSetup.self)
+                injector.returnEdge = setup.hostEdge.opposite
+                injector.onReturn = { _ = link.sendSecureObjectSync(ControlReturn()) }
                 while true {
                     let event = try await link.receiveSecureObject(ControlEvent.self)
                     if event.kind == .hostStats {

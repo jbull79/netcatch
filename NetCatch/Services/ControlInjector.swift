@@ -16,6 +16,11 @@ final class ControlInjector: @unchecked Sendable {
     private var mouseDown = false
     private let source = CGEventSource(stateID: .hidSystemState)
 
+    /// When the injected cursor reaches this edge, control should return to the host.
+    var returnEdge: ScreenEdge?
+    var onReturn: (() -> Void)?
+    private var wasAtReturnEdge = false
+
     // Pacing
     private let lock = NSLock()
     private var pendDX = 0.0, pendDY = 0.0
@@ -111,6 +116,21 @@ final class ControlInjector: @unchecked Sendable {
         cursor.x = min(max(bounds.minX, cursor.x + dx), bounds.maxX - 1)
         cursor.y = min(max(bounds.minY, cursor.y + dy), bounds.maxY - 1)
         postMouse(mouseDown ? .leftMouseDragged : .mouseMoved, button: .left)
+        checkReturnEdge()
+    }
+
+    /// Fire onReturn once when the cursor first reaches the return edge.
+    private func checkReturnEdge() {
+        guard let e = returnEdge else { return }
+        let hit: Bool
+        switch e {
+        case .right:  hit = cursor.x >= bounds.maxX - 1
+        case .left:   hit = cursor.x <= bounds.minX
+        case .top:    hit = cursor.y <= bounds.minY
+        case .bottom: hit = cursor.y >= bounds.maxY - 1
+        }
+        if hit && !wasAtReturnEdge { onReturn?() }
+        wasAtReturnEdge = hit
     }
 
     // MARK: CGEvent helpers

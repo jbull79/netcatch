@@ -21,6 +21,7 @@ final class ControlHost: ObservableObject {
     /// Set by the UI before connecting. Edge mode uses a global tap (needs Accessibility
     /// + Input Monitoring); window mode (click-to-capture) needs no permissions.
     var edgeModeEnabled = false
+    var controlEdge: ScreenEdge = .right     // which edge hands off (set by UI)
 
     // Mouse-move coalescing — accumulate deltas in a lock-guarded buffer, flushed on a
     // precise off-main timer so the cursor stream has a steady cadence (no Task.sleep /
@@ -57,10 +58,12 @@ final class ControlHost: ObservableObject {
                     return
                 }
                 link.setLowLatency()        // ask Wi-Fi not to batch our input frames
+                try await link.sendSecureObject(ControlSetup(hostEdge: self.controlEdge))
                 self.link = link
                 self.linkBox.link = link
                 self.state = .connected
                 if self.edgeModeEnabled { self.startEdgeMode() }
+                self.startReturnReader(link: link)
                 DebugLog.log("control host: connected to \(peer.name)")
             } catch {
                 self.lastError = error.localizedDescription
@@ -94,11 +97,22 @@ final class ControlHost: ObservableObject {
         }
     }
 
+    /// Read return signals from the client (its cursor reached the return edge) → take
+    /// control back to this Mac.
+    private func startReturnReader(link: PeerLink) {
+        Task { [weak self] in
+            while (try? await link.receiveSecureObject(ControlReturn.self)) != nil {
+                await MainActor.run { self?.endCapture() }
+            }
+        }
+    }
+
     /// Start edge-bump capture (global tap). Forwarding feeds the same buffer + sync send
     /// path as window mode.
     private func startEdgeMode() {
         let buf = moveBuffer; let box = linkBox; let q = flushQueue
         let edge = EdgeCapture(
+            edge: controlEdge,
             forwardMove: { dx, dy, flags in buf.add(dx: dx, dy: dy, flags: flags) },
             forwardDiscrete: { ce in
                 q.async {
@@ -151,7 +165,14 @@ final class ControlHost: ObservableObject {
         CGDisplayShowCursor(CGMainDisplayID())
         if warpInsideEdge {                         // move off the edge so it won't re-trigger
             let b = CGDisplayBounds(CGMainDisplayID())
-            CGWarpMouseCursorPosition(CGPoint(x: b.maxX - 60, y: b.midY))
+            let p: CGPoint
+            switch controlEdge {
+            case .right:  p = CGPoint(x: b.maxX - 60, y: b.midY)
+            case .left:   p = CGPoint(x: b.minX + 60, y: b.midY)
+            case .top:    p = CGPoint(x: b.midX, y: b.minY + 60)
+            case .bottom: p = CGPoint(x: b.midX, y: b.maxY - 60)
+            }
+            CGWarpMouseCursorPosition(p)
         }
         sendOnQueue(ControlEvent(kind: .releaseAll))   // flushes pending move + releaseAll
         DebugLog.log("control host: capture end")
